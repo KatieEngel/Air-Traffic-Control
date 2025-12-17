@@ -2,9 +2,10 @@
 import { onMounted, ref } from "vue";
 import axios from "axios";
 import L from "leaflet";
-import "leaflet/dist/leaflet.css"; // Import Leaflet CSS (Crucial!)
+import "leaflet/dist/leaflet.css";
+import { KalmanFilter } from './utils/KalmanFilter.js';
 
-// A simple SVG plane icon pointing North (0 degrees)
+// --- ICONS ---
 const PLANE_ICON_SVG = `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" style="filter: drop-shadow(1px 1px 2px rgba(0,0,0,0.5));">
   <path fill="#007bff" d="M21,16V14L13,9V3.5A1.5,1.5 0 0,0 11.5,2A1.5,1.5 0 0,0 10,3.5V9L2,14V16L10,13.5V19L8,20.5V22L11.5,21L15,22V20.5L13,19V13.5L21,16Z"/>
@@ -15,39 +16,44 @@ const PLANE_ICON_SVG = `
 const flights = ref([]); // Stores the raw flight data
 const map = ref(null); // Stores the map instance
 const markers = {}; // Dictionary to track existing markers by ICAO24 ID
+const filters = {}; // Store KalmanFilter instances by icao24
+const predictionLines = {};
+const selectedPlane = ref(null); // Track which plane is selected (store the icao24 string)
+const showTrendsToggle = ref(false); // track the toggle state
+let trendLayerGroup = null; // Initialize as null, create it in initMap
 
 // --- CONFIG ---
 const API_URL = "http://127.0.0.1:8000/flights";
 const REFRESH_RATE = 20000; // 20 seconds (OpenSky limit is strict, be careful!)
 
-// --- FUNCTIONS ---
-
-// 1. Initialize the Map
-const initMap = () => {
-  // Centered on Long Island, NY with Zoom 9
-  // IF TESTING: Center on Switzerland (Zoom 8)
-  // map.value = L.map("mapContainer").setView([46.818, 8.227], 8);
-
-  // IF PRODUCTION: Center on Long Island
-  map.value = L.map("mapContainer").setView([40.626, -73.861], 9);
-
-  // ... rest of code
-
-  // Add the tile layer (OpenStreetMap)
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    attribution: "&copy; OpenStreetMap contributors",
-  }).addTo(map.value);
+// Linear Interpolation: Calculates a point 't' percent between start and end
+// t=0.1 means "Move 10% of the distance towards the target"
+const lerp = (start, end, t) => {
+  return start + (end - start) * t;
 };
 
-// 2. Fetch Data from Python Backend
-const fetchFlights = async () => {
-  try {
-    const response = await axios.get(API_URL);
-    flights.value = response.data;
-    updateMap();
-  } catch (error) {
-    console.error("Error fetching flights:", error);
-  }
+// --- FUNCTIONS ---
+
+// Helper to convert Speed/Heading to Lat/Lon velocity
+const getVelocityComponents = (speed, heading, currentLat) => {
+  if (!speed || speed === 0) return [0, 0];
+  
+  // Convert degrees to radians
+  const rad = heading * (Math.PI / 180); 
+
+  // 1. Calculate Velocity in Degrees per Second
+  
+  // LATITUDE (Y-Axis): Corresponds to Cosine in Aviation (0 deg = North = +Y)
+  // 1 degree Lat is always ~111,111 meters
+  const vLat = Math.cos(rad) * speed * (1 / 111111);
+
+  // LONGITUDE (X-Axis): Corresponds to Sine in Aviation (90 deg = East = +X)
+  // 1 degree Long shrinks as you go North. We divide by cos(lat) to compensate.
+  // Example: At 40deg N (NY), 1 deg long is smaller, so you cover MORE degrees for the same speed.
+  const latRad = currentLat * (Math.PI / 180);
+  const vLng = Math.sin(rad) * speed * (1 / (111111 * Math.cos(latRad)));
+
+  return [vLat, vLng]; 
 };
 
 // Function to display the plane icon at the correct angle
@@ -62,22 +68,116 @@ const createPlaneIcon = (rotation) => {
   });
 };
 
-const predictionLines = {};
-// 3. Update Markers on the Map
+// --- CORE FUNCTIONS ---
+
+// 1. Initialize the Map
+const initMap = () => {
+  // Centered on Long Island, NY with Zoom 9
+  map.value = L.map("mapContainer").setView([40.626, -73.861], 9);
+
+  // Add the tile layer (OpenStreetMap)
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: "&copy; OpenStreetMap contributors",
+  }).addTo(map.value);
+
+  trendLayerGroup = L.layerGroup().addTo(map.value); // initialize layer grouping for trends
+
+  // DESELECT ON MAP CLICK
+  map.value.on('click', () => {
+    const oldSelection = selectedPlane.value;
+    selectedPlane.value = null;
+    if (oldSelection && predictionLines[oldSelection]) {
+      map.value.removeLayer(predictionLines[oldSelection]);
+      delete predictionLines[oldSelection];
+    }
+  });
+};
+
+// 2. Fetch Data from Python Backend
+const fetchFlights = async () => {
+  try {
+    const response = await axios.get(API_URL);
+    flights.value = response.data;
+    updateMap();
+  } catch (error) {
+    console.error("Error fetching flights:", error);
+  }
+};
+
+// Helper: Draws the prediction line for a single flight
+const drawPredictionLine = (flight) => {
+  // 1. Remove existing line for this plane if it exists
+  if (predictionLines[flight.icao24]) {
+    map.value.removeLayer(predictionLines[flight.icao24]);
+    delete predictionLines[flight.icao24];
+  }
+
+  // 2. Only draw if this is the SELECTED plane
+  if (selectedPlane.value !== flight.icao24) return;
+
+  // 3. Calculate Physics (Same math as before)
+  const now = Date.now() / 1000;
+  const [vLat, vLng] = getVelocityComponents(flight.velocity, flight.true_track, flight.lat);
+  
+  // Re-calculate the adjusted start point (latency comp) so line attaches to nose
+  const dataTimestamp = flight.time_position || flight.last_contact || now;
+  const lagSeconds = now - dataTimestamp;
+  const startLat = flight.lat + (vLat * lagSeconds);
+  const startLng = flight.long + (vLng * lagSeconds);
+
+  const PREDICTION_TIME = 120; // 2 minutes
+  const futureLat = startLat + (vLat * PREDICTION_TIME);
+  const futureLng = startLng + (vLng * PREDICTION_TIME);
+
+  // 4. Draw Line
+  const line = L.polyline([[startLat, startLng], [futureLat, futureLng]], {
+    color: "#39ff14", 
+    weight: 2,
+    opacity: 0.8,
+    dashArray: "5, 5", 
+  }).addTo(map.value);
+
+  predictionLines[flight.icao24] = line;
+};
+
 const updateMap = () => {
-  // Loop through every flight we fetched
+  const now = Date.now() / 1000;
+
   flights.value.forEach((flight) => {
-    // CHECK: Does this plane have valid coordinates?
-    // Remember: We set missing data to null in Python.
     if (flight.lat && flight.long) {
+
+      // Calculate initial velocity estimate
+      // Use true_track (heading) and velocity (speed)
+      const [vLat, vLng] = getVelocityComponents(flight.velocity, flight.true_track, flight.lat);
+
+      // How old is this data? (Current Time - GPS Time)
+      // If time_position is missing, assume 0 lag (fallback)
+      const dataTimestamp = flight.time_position || flight.last_contact || now;
+      const lagSeconds = now - dataTimestamp;
+
+      // Project the position forward to "Now"
+      // If data is 5s old, move the plane 5s worth of travel forward
+      let adjustedLat = flight.lat + (vLat * lagSeconds);
+      let adjustedLng = flight.long + (vLng * lagSeconds);
+
+      // If filter doesn't exist, create it
+      if (!filters[flight.icao24]) {
+        filters[flight.icao24] = new KalmanFilter(adjustedLat, adjustedLng, vLat, vLng);
+      } 
+    
+      // Update with the ADJUSTED position (Real-time estimate)
+      filters[flight.icao24].update(adjustedLat, adjustedLng);
+
+      // 2. FORCE Update the Velocity (Stop the "Fly Away" bug)
+      // This tells the filter: "I don't care what you calculated, THIS is the real speed."
+      filters[flight.icao24].setVelocity(vLat, vLng);
+
       // Flight marker:
       // 1. Calculate Rotation (Default to 0 if missing)
       const rotation = flight.true_track || 0;
 
       // 2. If marker exists, move it and update rotation
       if (markers[flight.icao24]) {
-        markers[flight.icao24].setLatLng([flight.lat, flight.long]);
-
         // Update the icon rotation
         markers[flight.icao24].setIcon(createPlaneIcon(rotation));
 
@@ -91,37 +191,105 @@ const updateMap = () => {
         // 3. Create new marker with the icon
         const newMarker = L.marker([flight.lat, flight.long], {
           icon: createPlaneIcon(rotation),
-        }).bindPopup(`
-          <b>${flight.callsign || "Unknown"}</b><br>
-          Alt: ${flight.geo_altitude}m
+        });
+
+        // Add Popup normally
+        newMarker.bindPopup(`
+            <b>${flight.callsign || "Unknown"}</b><br>
+            Alt: ${flight.geo_altitude}m
         `);
+
+        // Click Handler for Selection
+        newMarker.on('click', () => {
+          selectedPlane.value = flight.icao24;
+          drawPredictionLine(flight);
+        });
 
         newMarker.addTo(map.value);
         markers[flight.icao24] = newMarker;
       }
-
-      // Prediction Line:
-      if (flight.predicted_lat && flight.predicted_long) {
-        const start = [flight.lat, flight.long];
-        const end = [flight.predicted_lat, flight.predicted_long];
-
-        // If a line already exists for this plane, remove it so we can draw the new one
-        if (predictionLines[flight.icao24]) {
-          map.value.removeLayer(predictionLines[flight.icao24]);
-        }
-
-        // Draw the new line (Green = Prediction)
-        const line = L.polyline([start, end], {
-          color: "#800080", // Purple
-          weight: 2,
-          opacity: 0.8,
-          dashArray: "5, 5", // Dashed line
-        }).addTo(map.value);
-
-        predictionLines[flight.icao24] = line;
-      }
+      // --- PREDICTION LINE ---
+      // Update the line logic on every refresh (to keep it synced with the plane)
+      drawPredictionLine(flight);
     }
   });
+};
+
+const animate = () => {
+  requestAnimationFrame(animate);
+
+  Object.keys(markers).forEach(icao24 => {
+    const filter = filters[icao24];
+    const marker = markers[icao24];
+
+    if (filter && marker) {
+      // 1. Get the "Target" (Where the math says we should be)
+      const targetPos = filter.predict();
+      
+      // 2. Get the "Current" (Where the icon actually is)
+      const currentLatLng = marker.getLatLng();
+      
+      // 3. LERP: Move 5% of the way towards the target per frame
+      // Lower number (0.01) = Very slow/smooth "drift"
+      // Higher number (0.1) = Snappier response
+      const SMOOTHING_FACTOR = 0.05; 
+      
+      const newLat = lerp(currentLatLng.lat, targetPos.lat, SMOOTHING_FACTOR);
+      const newLng = lerp(currentLatLng.lng, targetPos.lng, SMOOTHING_FACTOR);
+      
+      // 4. Update the marker
+      marker.setLatLng([newLat, newLng]);
+    }
+  });
+};
+
+// Function to visualize the Markov Model
+const toggleTrends = async () => {
+  // 1. Check the Boolean State (True = Show, False = Hide)
+  if (showTrendsToggle.value) {
+    
+    // TURN ON
+    try {
+      console.log("Fetching trends...");
+      const response = await axios.get("http://127.0.0.1:8000/model");
+      const model = response.data;
+      
+      // Clear before adding to avoid duplicates
+      trendLayerGroup.clearLayers();
+
+      let count = 0;
+      for (const [gridKey, outcomes] of Object.entries(model)) {
+        const bestMove = outcomes[0];
+        if (bestMove.prob < 0.1) continue; 
+
+        const [latIdx, lonIdx] = gridKey.split('_').map(Number);
+        const gridLat = (latIdx * 0.1) + 0.05; 
+        const gridLon = (lonIdx * 0.1) + 0.05;
+        
+        const weight = bestMove.prob * 8; 
+        const opacity = bestMove.prob * 0.8; 
+        const color = bestMove.prob > 0.5 ? '#ff0055' : '#00aaff';
+
+        const line = L.polyline([[gridLat, gridLon], [bestMove.target_lat, bestMove.target_lon]], {
+          color: color,
+          weight: weight,
+          opacity: opacity,
+          lineCap: 'round'
+        });
+        
+        trendLayerGroup.addLayer(line);
+        count++;
+      }
+      console.log(`Drew ${count} trend lines.`);
+      
+    } catch (e) {
+      console.error("Error loading model", e);
+    }
+
+  } else {
+    // TURN OFF
+    trendLayerGroup.clearLayers();
+  }
 };
 
 // --- LIFECYCLE ---
@@ -131,6 +299,8 @@ onMounted(() => {
 
   // Set up the loop
   setInterval(fetchFlights, REFRESH_RATE);
+
+  animate();
 });
 </script>
 
@@ -138,6 +308,17 @@ onMounted(() => {
   <div class="app-container">
     <div class="sidebar">
       <h2>Flight List ({{ flights.length }})</h2>
+
+      <div class="toggle-container">
+        <span class="toggle-label">Show Flight Trends</span>
+        <label class="switch">
+          <input type="checkbox" v-model="showTrendsToggle" @change="toggleTrends">
+          <span class="slider round"></span>
+        </label>
+      </div>
+
+      <hr>
+
       <ul>
         <li v-for="flight in flights" :key="flight.icao24">
           <strong>{{ flight.callsign || "N/A" }}</strong>
@@ -188,6 +369,69 @@ li {
 .warning {
   color: red;
   font-size: 0.8em;
+}
+
+/* Container for the label and switch */
+.toggle-container {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+  padding: 0.5rem;
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+.toggle-label {
+  font-weight: bold;
+  font-size: 0.9rem;
+  color: #333;
+}
+
+/* The Switch Box */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 50px;
+  height: 26px;
+}
+
+/* Hide default HTML checkbox */
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+/* The Slider */
+.slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-color: #ccc;
+  transition: .4s;
+  border-radius: 34px;
+}
+
+.slider:before {
+  position: absolute;
+  content: "";
+  height: 20px;
+  width: 20px;
+  left: 3px;
+  bottom: 3px;
+  background-color: white;
+  transition: .4s;
+  border-radius: 50%;
+}
+
+input:checked + .slider {
+  background-color: #2196F3;
+}
+
+input:checked + .slider:before {
+  transform: translateX(24px);
 }
 
 /* Note: Use :deep() or remove 'scoped' to affect Leaflet elements */

@@ -1,0 +1,22 @@
+# --- Python ---
+venv/
+__pycache__/
+*.pyc
+
+# --- Javascript / Vue ---
+atc-frontend/node_modules/
+atc-frontend/dist/
+
+# --- System ---
+.DS_Store
+
+# --- Data & Models ---
+# Don't commit massive CSVs
+data/flight_history.csv
+data/final_markov_training_set.csv
+# You CAN commit the JSON model if it's small, or regenerate it later.
+# data/markov_model.json 
+
+# --- IDE Settings ---
+.vscode/
+.idea/

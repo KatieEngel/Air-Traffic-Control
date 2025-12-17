@@ -33,8 +33,9 @@ app.add_middleware(
 # --- 2. CONFIGURATION ---
 # Replace with your actual credentials
 # (Ideally, use environment variables in the long run)
-CLIENT_ID = "katie.engel31006@gmail.com-api-client"
-CLIENT_SECRET = "kiS868RdfTTVwtVpJMbsukWtXmUvMJhR"
+CLIENT_ID = "OPENSKY_USERNAME"
+CLIENT_SECRET = "OPENSKY_PASSWORD"
+
 
 # --- CONFIGURATION ---
 
@@ -184,3 +185,8 @@ def get_flights(background_tasks: BackgroundTasks):
 
     except requests.exceptions.RequestException as e:
         raise HTTPException(status_code=503, detail=f"OpenSky API Error: {str(e)}")
+    
+@app.get("/model")
+def get_model():
+    """Returns the raw Markov probabilities for visualization."""
+    return MARKOV_MODEL

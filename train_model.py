@@ -4,7 +4,7 @@ import json
 import os
 
 # --- CONFIGURATION ---
-INPUT_FILE = "data/final_markov_training_set.csv"
+INPUT_FILE = "data/flight_history.csv"  # <--- Point to your collected data
 MODEL_FILE = "data/markov_model.json"
 
 # Grid Precision: 0.1 degrees is roughly 11km (Approx 7 miles)
@@ -46,10 +46,14 @@ def train():
     print("Training Markov Model (Counting transitions)...")
 
     # Group by flight so we don't connect the end of one flight to the start of another
-    for flight_id, flight_data in df.groupby('icao24'):
+    for plane_id, flight_data in df.groupby('icao24'):
+
+        # Filter: Skip planes with only 1 data point (cannot detect movement)
+        if len(flight_data) < 2:
+            continue
         
         # Get all coordinates for this single flight as a list
-        coords = list(zip(flight_data['latitude'], flight_data['longitude']))
+        coords = list(zip(flight_data['lat'], flight_data['long']))
         
         # Loop through the path
         for i in range(len(coords) - 1):
