@@ -7,6 +7,9 @@ import os
 import csv 
 from datetime import datetime
 import json
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Load the Markov Model once
 MODEL_FILE = "data/markov_model.json"
@@ -33,8 +36,11 @@ app.add_middleware(
 # --- 2. CONFIGURATION ---
 # Replace with your actual credentials
 # (Ideally, use environment variables in the long run)
-CLIENT_ID = "OPENSKY_USERNAME"
-CLIENT_SECRET = "OPENSKY_PASSWORD"
+CLIENT_ID = os.getenv("OPENSKY_CLIENT_ID")
+CLIENT_SECRET = os.getenv("OPENSKY_CLIENT_SECRET")
+
+if not CLIENT_ID or not CLIENT_SECRET:
+    print("WARNING: OpenSky credentials not found in .env file!")
 
 
 # --- CONFIGURATION ---
