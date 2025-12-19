@@ -18,6 +18,7 @@ const map = ref(null); // Stores the map instance
 const markers = {}; // Dictionary to track existing markers by ICAO24 ID
 const filters = {}; // Store KalmanFilter instances by icao24
 const predictionLines = {};
+const ghostMarkers = {};
 const selectedPlane = ref(null); // Track which plane is selected (store the icao24 string)
 const showTrendsToggle = ref(false); // track the toggle state
 let trendLayerGroup = null; // Initialize as null, create it in initMap
@@ -57,10 +58,10 @@ const getVelocityComponents = (speed, heading, currentLat) => {
 };
 
 // Function to display the plane icon at the correct angle
-const createPlaneIcon = (rotation) => {
+const createPlaneIcon = (rotation, opacity = 1.0) => {
   return L.divIcon({
     className: "custom-plane-icon", // We will style this slightly in CSS
-    html: `<div style="transform: rotate(${rotation}deg); transform-origin: center;">
+    html: `<div style="transform: rotate(${rotation}deg); transform-origin: center; opacity: ${opacity};">
              ${PLANE_ICON_SVG}
            </div>`,
     iconSize: [24, 24],
@@ -84,12 +85,8 @@ const initMap = () => {
 
   // DESELECT ON MAP CLICK
   map.value.on('click', () => {
-    const oldSelection = selectedPlane.value;
+    clearAllVisuals();
     selectedPlane.value = null;
-    if (oldSelection && predictionLines[oldSelection]) {
-      map.value.removeLayer(predictionLines[oldSelection]);
-      delete predictionLines[oldSelection];
-    }
   });
 };
 
@@ -104,40 +101,105 @@ const fetchFlights = async () => {
   }
 };
 
-// Helper: Draws the prediction line for a single flight
-const drawPredictionLine = (flight) => {
-  // 1. Remove existing line for this plane if it exists
+// // Helper: Draws the prediction line for a single flight
+// const drawPredictionLine = (flight) => {
+//   // 1. Remove existing line for this plane if it exists
+//   if (predictionLines[flight.icao24]) {
+//     map.value.removeLayer(predictionLines[flight.icao24]);
+//     delete predictionLines[flight.icao24];
+//   }
+
+//   // 2. Only draw if this is the SELECTED plane
+//   if (selectedPlane.value !== flight.icao24) return;
+
+//   // 3. Calculate Physics (Same math as before)
+//   const now = Date.now() / 1000;
+//   const [vLat, vLng] = getVelocityComponents(flight.velocity, flight.true_track, flight.lat);
+  
+//   // Re-calculate the adjusted start point (latency comp) so line attaches to nose
+//   const dataTimestamp = flight.time_position || flight.last_contact || now;
+//   const lagSeconds = now - dataTimestamp;
+//   const startLat = flight.lat + (vLat * lagSeconds);
+//   const startLng = flight.long + (vLng * lagSeconds);
+
+//   const PREDICTION_TIME = 60; // 1 minutes
+//   const futureLat = startLat + (vLat * PREDICTION_TIME);
+//   const futureLng = startLng + (vLng * PREDICTION_TIME);
+
+  
+// };
+
+const drawGhostPlane = (flight) => {
+  // 1. Clear old ghost for this plane
+  clearAllVisuals();
+
+  // 2. Only draw if SELECTED
+  if (selectedPlane.value !== flight.icao24) return;
+
+  // Clear specific existing visuals for THIS plane (refresh) 
+  // We don't use clearAllVisuals here or it would flicker constantly in the loop.
   if (predictionLines[flight.icao24]) {
     map.value.removeLayer(predictionLines[flight.icao24]);
     delete predictionLines[flight.icao24];
   }
+  if (ghostMarkers[flight.icao24]) {
+    map.value.removeLayer(ghostMarkers[flight.icao24]);
+    delete ghostMarkers[flight.icao24];
+  }
 
-  // 2. Only draw if this is the SELECTED plane
-  if (selectedPlane.value !== flight.icao24) return;
-
-  // 3. Calculate Physics (Same math as before)
+  // 3. Calculate Physics (1 Minute Prediction)
   const now = Date.now() / 1000;
   const [vLat, vLng] = getVelocityComponents(flight.velocity, flight.true_track, flight.lat);
   
-  // Re-calculate the adjusted start point (latency comp) so line attaches to nose
+  // Latency compensation for start point
   const dataTimestamp = flight.time_position || flight.last_contact || now;
   const lagSeconds = now - dataTimestamp;
   const startLat = flight.lat + (vLat * lagSeconds);
   const startLng = flight.long + (vLng * lagSeconds);
 
-  const PREDICTION_TIME = 120; // 2 minutes
+  // PREDICT: 60 Seconds into the future
+  const PREDICTION_TIME = 60; 
   const futureLat = startLat + (vLat * PREDICTION_TIME);
   const futureLng = startLng + (vLng * PREDICTION_TIME);
 
-  // 4. Draw Line
+  // Create Ghost Marker
+  // Opacity 0.4 makes it look like a shadow/projection
+  const rotation = flight.true_track || 0;
+  const ghost = L.marker([futureLat, futureLng], {
+    icon: createPlaneIcon(rotation, 0.4), 
+    interactive: false // Important: Click-through so it doesn't block the map
+  }).addTo(map.value);
+
+  // Draw Line
   const line = L.polyline([[startLat, startLng], [futureLat, futureLng]], {
-    color: "#39ff14", 
+    color: "#d014ffff", 
     weight: 2,
     opacity: 0.8,
     dashArray: "5, 5", 
   }).addTo(map.value);
 
   predictionLines[flight.icao24] = line;
+  ghostMarkers[flight.icao24] = ghost;
+};
+
+// Helper: robustly removes ANY visual elements associated with a plane
+const clearAllVisuals = (icao24) => {
+  Object.keys(predictionLines).forEach(icao => {
+    if (predictionLines[icao]) {
+      map.value.removeLayer(predictionLines[icao]);
+    }
+  });
+  // Reset the object (delete all keys)
+  for (const key in predictionLines) delete predictionLines[key];
+
+  // 2. Wipe all Ghosts
+  Object.keys(ghostMarkers).forEach(icao => {
+    if (ghostMarkers[icao]) {
+      map.value.removeLayer(ghostMarkers[icao]);
+    }
+  });
+  // Reset the object
+  for (const key in ghostMarkers) delete ghostMarkers[key];
 };
 
 const updateMap = () => {
@@ -200,9 +262,15 @@ const updateMap = () => {
         `);
 
         // Click Handler for Selection
-        newMarker.on('click', () => {
+        newMarker.on('click', (e) => {
+          // Prevent the map background click from firing immediately
+          L.DomEvent.stopPropagation(e);
+
+          // IF THERE IS ALREADY A SELECTED PLANE, CLEAR ITS LINE
+          clearAllVisuals();
+
           selectedPlane.value = flight.icao24;
-          drawPredictionLine(flight);
+          drawGhostPlane(flight);
         });
 
         newMarker.addTo(map.value);
@@ -210,7 +278,7 @@ const updateMap = () => {
       }
       // --- PREDICTION LINE ---
       // Update the line logic on every refresh (to keep it synced with the plane)
-      drawPredictionLine(flight);
+      drawGhostPlane(flight);
     }
   });
 };
@@ -237,8 +305,36 @@ const animate = () => {
       const newLat = lerp(currentLatLng.lat, targetPos.lat, SMOOTHING_FACTOR);
       const newLng = lerp(currentLatLng.lng, targetPos.lng, SMOOTHING_FACTOR);
       
-      // 4. Update the marker
+      // Update the marker
       marker.setLatLng([newLat, newLng]);
+
+      // UPDATE PREDICTION VISUALS (If this plane is selected)
+      if (selectedPlane.value === icao24) {
+        
+        // Retrieve velocity from the Kalman Filter state
+        // x[2] is vLat, x[3] is vLng
+        const vLat = filter.x[2];
+        const vLng = filter.x[3];
+
+        // Calculate Future Position (60 seconds from NOW)
+        // We use 'newLat'/'newLng' so the line stays attached to the plane's nose
+        const PREDICTION_TIME = 60;
+        const futureLat = newLat + (vLat * PREDICTION_TIME);
+        const futureLng = newLng + (vLng * PREDICTION_TIME);
+
+        // Move the Ghost Marker
+        if (ghostMarkers[icao24]) {
+          ghostMarkers[icao24].setLatLng([futureLat, futureLng]);
+        }
+
+        // Move the Prediction Line
+        if (predictionLines[icao24]) {
+          predictionLines[icao24].setLatLngs([
+            [newLat, newLng],       // Start at plane
+            [futureLat, futureLng]  // End at ghost
+          ]);
+        }
+      }
     }
   });
 };
