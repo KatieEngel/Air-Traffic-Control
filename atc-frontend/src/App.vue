@@ -130,56 +130,80 @@ const fetchFlights = async () => {
 // };
 
 const drawGhostPlane = (flight) => {
-  // 1. Clear old ghost for this plane
-  clearAllVisuals();
-
-  // 2. Only draw if SELECTED
+  // Only draw if SELECTED
   if (selectedPlane.value !== flight.icao24) return;
 
-  // Clear specific existing visuals for THIS plane (refresh) 
-  // We don't use clearAllVisuals here or it would flicker constantly in the loop.
-  if (predictionLines[flight.icao24]) {
-    map.value.removeLayer(predictionLines[flight.icao24]);
-    delete predictionLines[flight.icao24];
-  }
-  if (ghostMarkers[flight.icao24]) {
-    map.value.removeLayer(ghostMarkers[flight.icao24]);
-    delete ghostMarkers[flight.icao24];
+  let vLat, vLng, startLat, startLng;
+  const now = Date.now() / 1000;
+
+  // Check if we have a Kalman Filter for this plane (We should!)
+  if (filters[flight.icao24]) {
+    // USE THE FILTER'S MEMORY (Robust against missing API data)
+    vLat = filters[flight.icao24].x[2];
+    vLng = filters[flight.icao24].x[3];
+    
+    // We can also use the filter's smoothed position as the start point
+    startLat = filters[flight.icao24].x[0];
+    startLng = filters[flight.icao24].x[1];
+  } else {
+    // Fallback if filter is missing (e.g. first frame)
+    [vLat, vLng] = getVelocityComponents(flight.velocity, flight.true_track, flight.lat);
+    startLat = flight.lat;
+    startLng = flight.long;
   }
 
-  // 3. Calculate Physics (1 Minute Prediction)
-  const now = Date.now() / 1000;
-  const [vLat, vLng] = getVelocityComponents(flight.velocity, flight.true_track, flight.lat);
-  
-  // Latency compensation for start point
-  const dataTimestamp = flight.time_position || flight.last_contact || now;
-  const lagSeconds = now - dataTimestamp;
-  const startLat = flight.lat + (vLat * lagSeconds);
-  const startLng = flight.long + (vLng * lagSeconds);
+  // If velocity is basically zero...
+  if (Math.abs(vLat) < 0.000001 && Math.abs(vLng) < 0.000001) {
+    
+    // ...we must REMOVE any existing visuals so they don't get stuck...
+    if (predictionLines[flight.icao24]) {
+      map.value.removeLayer(predictionLines[flight.icao24]);
+      delete predictionLines[flight.icao24];
+    }
+    if (ghostMarkers[flight.icao24]) {
+      map.value.removeLayer(ghostMarkers[flight.icao24]);
+      delete ghostMarkers[flight.icao24];
+    }
+    return;
+  }
 
   // PREDICT: 60 Seconds into the future
   const PREDICTION_TIME = 60; 
   const futureLat = startLat + (vLat * PREDICTION_TIME);
   const futureLng = startLng + (vLng * PREDICTION_TIME);
-
-  // Create Ghost Marker
-  // Opacity 0.4 makes it look like a shadow/projection
   const rotation = flight.true_track || 0;
-  const ghost = L.marker([futureLat, futureLng], {
-    icon: createPlaneIcon(rotation, 0.4), 
-    interactive: false // Important: Click-through so it doesn't block the map
-  }).addTo(map.value);
 
-  // Draw Line
-  const line = L.polyline([[startLat, startLng], [futureLat, futureLng]], {
-    color: "#d014ffff", 
-    weight: 2,
-    opacity: 0.8,
-    dashArray: "5, 5", 
-  }).addTo(map.value);
+  // A. HANDLE THE PREDICTION LINE
+  if (predictionLines[flight.icao24]) {
+    // UPDATE EXISTING LINE (No flicker)
+    predictionLines[flight.icao24].setLatLngs([
+      [startLat, startLng],
+      [futureLat, futureLng]
+    ]);
+  } else {
+    // CREATE NEW LINE
+    const line = L.polyline([[startLat, startLng], [futureLat, futureLng]], {
+      color: "#9d00ff", 
+      weight: 2,
+      opacity: 0.8,
+      dashArray: "5, 5", 
+    }).addTo(map.value);
+    predictionLines[flight.icao24] = line;
+  }
 
-  predictionLines[flight.icao24] = line;
-  ghostMarkers[flight.icao24] = ghost;
+  // B. HANDLE THE GHOST MARKER
+  if (ghostMarkers[flight.icao24]) {
+    // UPDATE EXISTING MARKER (No flicker)
+    ghostMarkers[flight.icao24].setLatLng([futureLat, futureLng]);
+    ghostMarkers[flight.icao24].setIcon(createPlaneIcon(rotation, 0.4));
+  } else {
+    // CREATE NEW MARKER
+    const ghost = L.marker([futureLat, futureLng], {
+      icon: createPlaneIcon(rotation, 0.4), 
+      interactive: false 
+    }).addTo(map.value);
+    ghostMarkers[flight.icao24] = ghost;
+  }
 };
 
 // Helper: robustly removes ANY visual elements associated with a plane
