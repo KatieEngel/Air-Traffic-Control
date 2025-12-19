@@ -58,11 +58,18 @@ const getVelocityComponents = (speed, heading, currentLat) => {
 };
 
 // Function to display the plane icon at the correct angle
-const createPlaneIcon = (rotation, opacity = 1.0) => {
+const createPlaneIcon = (rotation, opacity = 1.0, color = "#ffffff") => {
+  // We embed the color directly into the SVG path fill
+  const svgHtml = `
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" 
+         style="filter: drop-shadow(0px 2px 4px rgba(0,0,0,0.8));">
+      <path fill="${color}" d="M21,16V14L13,9V3.5A1.5,1.5 0 0,0 11.5,2A1.5,1.5 0 0,0 10,3.5V9L2,14V16L10,13.5V19L8,20.5V22L11.5,21L15,22V20.5L13,19V13.5L21,16Z"/>
+    </svg>
+  `;
   return L.divIcon({
     className: "custom-plane-icon", // We will style this slightly in CSS
     html: `<div style="transform: rotate(${rotation}deg); transform-origin: center; opacity: ${opacity};">
-             ${PLANE_ICON_SVG}
+             ${svgHtml}
            </div>`,
     iconSize: [24, 24],
     iconAnchor: [12, 12], // Center the rotation point
@@ -76,15 +83,26 @@ const initMap = () => {
   // Centered on Long Island, NY with Zoom 9
   map.value = L.map("mapContainer").setView([40.626, -73.861], 9);
 
-  // Add the tile layer (OpenStreetMap)
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    attribution: "&copy; OpenStreetMap contributors",
+  // DARK MODE MAP TILES
+  L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+    subdomains: 'abcd',
+    maxZoom: 20
   }).addTo(map.value);
 
   trendLayerGroup = L.layerGroup().addTo(map.value); // initialize layer grouping for trends
 
   // DESELECT ON MAP CLICK
   map.value.on('click', () => {
+    // 1. If a plane was selected, turn it back to WHITE
+    if (selectedPlane.value && markers[selectedPlane.value]) {
+       const oldId = selectedPlane.value;
+       const oldFlight = flights.value.find(f => f.icao24 === oldId);
+       const oldRotation = oldFlight ? (oldFlight.true_track || 0) : 0;
+       
+       markers[oldId].setIcon(createPlaneIcon(oldRotation, 1.0, "#ffffff"));
+       markers[oldId].setZIndexOffset(0);
+    }
     clearAllVisuals();
     selectedPlane.value = null;
   });
@@ -181,12 +199,12 @@ const drawGhostPlane = (flight) => {
       [futureLat, futureLng]
     ]);
   } else {
-    // CREATE NEW LINE
+    // LINE
     const line = L.polyline([[startLat, startLng], [futureLat, futureLng]], {
-      color: "#9d00ff", 
+      color: "#ffcc00",  // Gold/Amber
       weight: 2,
-      opacity: 0.8,
-      dashArray: "5, 5", 
+      opacity: 0.9,
+      dashArray: "4, 8", // Sparse dots look more "predictive"
     }).addTo(map.value);
     predictionLines[flight.icao24] = line;
   }
@@ -199,7 +217,7 @@ const drawGhostPlane = (flight) => {
   } else {
     // CREATE NEW MARKER
     const ghost = L.marker([futureLat, futureLng], {
-      icon: createPlaneIcon(rotation, 0.4), 
+      icon: createPlaneIcon(rotation, 0.5, "#ffcc00"), 
       interactive: false 
     }).addTo(map.value);
     ghostMarkers[flight.icao24] = ghost;
@@ -262,10 +280,16 @@ const updateMap = () => {
       // 1. Calculate Rotation (Default to 0 if missing)
       const rotation = flight.true_track || 0;
 
+      const isSelected = selectedPlane.value === flight.icao24;
+      const planeColor = isSelected ? "#ffcc00" : "#ffffff"; // Gold vs White
+
       // 2. If marker exists, move it and update rotation
       if (markers[flight.icao24]) {
         // Update the icon rotation
-        markers[flight.icao24].setIcon(createPlaneIcon(rotation));
+        markers[flight.icao24].setIcon(createPlaneIcon(rotation, 1.0, planeColor));
+
+        // Fix z-index: Selected plane should always be on TOP of others
+        markers[flight.icao24].setZIndexOffset(isSelected ? 1000 : 0);
 
         // Update popup text
         markers[flight.icao24].setPopupContent(`
@@ -276,7 +300,7 @@ const updateMap = () => {
       } else {
         // 3. Create new marker with the icon
         const newMarker = L.marker([flight.lat, flight.long], {
-          icon: createPlaneIcon(rotation),
+          icon: createPlaneIcon(rotation, 1.0, planeColor),
         });
 
         // Add Popup normally
@@ -289,18 +313,35 @@ const updateMap = () => {
         newMarker.on('click', (e) => {
           // Prevent the map background click from firing immediately
           L.DomEvent.stopPropagation(e);
+          clearAllVisuals(); // Remove lines/ghosts
 
-          // IF THERE IS ALREADY A SELECTED PLANE, CLEAR ITS LINE
-          clearAllVisuals();
+          // 1. RESET THE *OLD* PLANE TO WHITE
+          // We look up the old ID, find its marker, and reset its icon
+          if (selectedPlane.value && markers[selectedPlane.value]) {
+            const oldId = selectedPlane.value;
+            
+            // We need the old plane's rotation to redraw the icon correctly.
+            // We find it in the current flights list.
+            const oldFlight = flights.value.find(f => f.icao24 === oldId);
+            const oldRotation = oldFlight ? (oldFlight.true_track || 0) : 0;
+
+            markers[oldId].setIcon(createPlaneIcon(oldRotation, 1.0, "#ffffff")); // White
+            markers[oldId].setZIndexOffset(0);
+          }
 
           selectedPlane.value = flight.icao24;
+
+          // 2. Turn THIS marker Gold immediately
+          const freshRotation = flight.true_track || 0;
+          newMarker.setIcon(createPlaneIcon(freshRotation, 1.0, "#ffcc00"));
+          newMarker.setZIndexOffset(1000);
+
           drawGhostPlane(flight);
         });
 
         newMarker.addTo(map.value);
         markers[flight.icao24] = newMarker;
       }
-      // --- PREDICTION LINE ---
       // Update the line logic on every refresh (to keep it synced with the plane)
       drawGhostPlane(flight);
     }
@@ -381,9 +422,9 @@ const toggleTrends = async () => {
         
         // Create a Polyline for this flight
         const line = L.polyline(path, {
-          color: '#00aaff',    // Cyan color (looks good on maps)
-          weight: 2,           // Thin lines
-          opacity: 0.3,        // Low opacity: overlapping lines will glow brighter!
+          color: '#00e5ff',    // Cyan / Electric Blue
+          weight: 1.5,         // Thinner lines look more elegant
+          opacity: 0.4,
           className: 'history-line' 
         });
 
@@ -446,82 +487,109 @@ onMounted(() => {
 </template>
 
 <style scoped>
+/* 1. Main Container: Dark Background */
 .app-container {
   display: flex;
   height: 100vh;
-  width: 100vw;
+  width: 100%;
+  overflow: hidden;
+  background-color: #121212; /* Prevents white flashes */
+  color: #e0e0e0; /* Light text */
+  
 }
 
+/* 2. Sidebar: Dark Grey with Border */
 .sidebar {
   width: 300px;
-  background: #f4f4f4;
+  background: #1e1e1e;
   overflow-y: auto;
   padding: 1rem;
-  border-right: 2px solid #ddd;
+  border-right: 1px solid #333;
+  box-shadow: 2px 0 5px rgba(0,0,0,0.5);
+  z-index: 1000; /* Ensure it sits above map controls if needed */
+  scrollbar-color: #e0e0e0 #333;
+  scrollbar-width: thin;
+  font-family: 'Inter', sans-serif;
+  color: #b0b3b8; /* Softer grey text, not pure white */
 }
 
 .map-view {
-  flex-grow: 1; /* Take up remaining space */
+  flex-grow: 1;
   height: 100%;
 }
 
+/* 3. List Items: Card Style */
 ul {
   list-style: none;
   padding: 0;
 }
 
 li {
-  background: white;
+  background: #2c2c2c;
   margin-bottom: 0.5rem;
-  padding: 0.5rem;
-  border-radius: 4px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  padding: 0.75rem;
+  border-radius: 6px;
+  border: 1px solid #333;
+  transition: all 0.2s ease;
 }
 
+/* Call signs and Numbers */
+li strong, 
+.leaflet-popup-content b {
+  color: #fff; /* Bright White */
+  font-family: 'JetBrains Mono', monospace; /* Tech look */
+  letter-spacing: -0.5px;
+}
+
+li small {
+  color: #00e5ff; /* Cyan for metadata */
+}
+
+/* Hover effect for list items */
+li:hover {
+  background: #383838;
+  border-color: #555;
+  transform: translateX(2px);
+}
+
+/* Warning Text */
 .warning {
-  color: red;
+  color: #ff4444; /* Brighter red for dark mode */
   font-size: 0.8em;
 }
 
-/* Container for the label and switch */
+/* 4. Toggle Switch: Dark Theme */
 .toggle-container {
   display: flex;
   align-items: center;
   justify-content: space-between;
   margin-bottom: 1rem;
-  padding: 0.5rem;
-  background: #fff;
+  padding: 0.75rem;
+  background: #252525;
   border-radius: 8px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+  border: 1px solid #333;
 }
 
 .toggle-label {
-  font-weight: bold;
+  font-weight: 600;
   font-size: 0.9rem;
-  color: #333;
+  color: #ccc;
 }
 
-/* The Switch Box */
 .switch {
   position: relative;
   display: inline-block;
-  width: 50px;
-  height: 26px;
+  width: 46px;
+  height: 24px;
 }
 
-/* Hide default HTML checkbox */
-.switch input {
-  opacity: 0;
-  width: 0;
-  height: 0;
-}
+.switch input { opacity: 0; width: 0; height: 0; }
 
-/* The Slider */
 .slider {
   position: absolute;
   cursor: pointer;
   top: 0; left: 0; right: 0; bottom: 0;
-  background-color: #ccc;
+  background-color: #444; /* Darker off state */
   transition: .4s;
   border-radius: 34px;
 }
@@ -529,8 +597,8 @@ li {
 .slider:before {
   position: absolute;
   content: "";
-  height: 20px;
-  width: 20px;
+  height: 18px;
+  width: 18px;
   left: 3px;
   bottom: 3px;
   background-color: white;
@@ -539,21 +607,41 @@ li {
 }
 
 input:checked + .slider {
-  background-color: #2196F3;
+  background-color: #00bcd4; /* Cyan accent color */
 }
 
 input:checked + .slider:before {
-  transform: translateX(24px);
+  transform: translateX(22px);
 }
 
-/* Note: Use :deep() or remove 'scoped' to affect Leaflet elements */
+/* Remove Leaflet icon background */
 :deep(.leaflet-div-icon) {
   background: transparent;
   border: none;
 }
 
+/* Fix popup text color (Popups are white by default) */
+:deep(.leaflet-popup-content-wrapper),
+:deep(.leaflet-popup-tip) {
+  background: #1e1e1e;
+  color: #e0e0e0;
+  border: 1px solid #444;
+}
+
 /* Make the history lines blend together */
 :deep(.history-line) {
   mix-blend-mode: screen; /* On dark maps, this makes overlaps glow white */
+}
+</style>
+
+<style>
+body {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background-color: #121212;
+  /* Apply new font globally */
+  font-family: 'Inter', sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 </style>
