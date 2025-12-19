@@ -363,51 +363,43 @@ const animate = () => {
   });
 };
 
-// Function to visualize the Markov Model
 const toggleTrends = async () => {
-  // 1. Check the Boolean State (True = Show, False = Hide)
   if (showTrendsToggle.value) {
-    
-    // TURN ON
     try {
-      console.log("Fetching trends...");
-      const response = await axios.get("http://127.0.0.1:8000/model");
-      const model = response.data;
+      console.log("Fetching flight history...");
       
-      // Clear before adding to avoid duplicates
+      // Request the last 24 hours of data
+      const response = await axios.get("http://127.0.0.1:8000/history?hours=24");
+      const historyPaths = response.data;
+      
       trendLayerGroup.clearLayers();
-
+      
       let count = 0;
-      for (const [gridKey, outcomes] of Object.entries(model)) {
-        const bestMove = outcomes[0];
-        if (bestMove.prob < 0.1) continue; 
 
-        const [latIdx, lonIdx] = gridKey.split('_').map(Number);
-        const gridLat = (latIdx * 0.1) + 0.05; 
-        const gridLon = (lonIdx * 0.1) + 0.05;
+      // Loop through each plane's path
+      for (const [icao, path] of Object.entries(historyPaths)) {
         
-        const weight = bestMove.prob * 8; 
-        const opacity = bestMove.prob * 0.8; 
-        const color = bestMove.prob > 0.5 ? '#ff0055' : '#00aaff';
-
-        const line = L.polyline([[gridLat, gridLon], [bestMove.target_lat, bestMove.target_lon]], {
-          color: color,
-          weight: weight,
-          opacity: opacity,
-          lineCap: 'round'
+        // Create a Polyline for this flight
+        const line = L.polyline(path, {
+          color: '#00aaff',    // Cyan color (looks good on maps)
+          weight: 2,           // Thin lines
+          opacity: 0.3,        // Low opacity: overlapping lines will glow brighter!
+          className: 'history-line' 
         });
-        
+
+        // Add a tooltip so you can see which plane it was
+        line.bindTooltip(icao, { sticky: true });
+
         trendLayerGroup.addLayer(line);
         count++;
       }
-      console.log(`Drew ${count} trend lines.`);
       
-    } catch (e) {
-      console.error("Error loading model", e);
-    }
+      console.log(`Drew ${count} historical flight paths.`);
 
+    } catch (e) {
+      console.error("Error loading history", e);
+    }
   } else {
-    // TURN OFF
     trendLayerGroup.clearLayers();
   }
 };
@@ -558,5 +550,10 @@ input:checked + .slider:before {
 :deep(.leaflet-div-icon) {
   background: transparent;
   border: none;
+}
+
+/* Make the history lines blend together */
+:deep(.history-line) {
+  mix-blend-mode: screen; /* On dark maps, this makes overlaps glow white */
 }
 </style>

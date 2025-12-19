@@ -8,6 +8,7 @@ import csv
 from datetime import datetime
 import json
 from dotenv import load_dotenv
+import time
 
 load_dotenv()
 
@@ -192,7 +193,46 @@ def get_flights(background_tasks: BackgroundTasks):
     except requests.exceptions.RequestException as e:
         raise HTTPException(status_code=503, detail=f"OpenSky API Error: {str(e)}")
     
-@app.get("/model")
-def get_model():
-    """Returns the raw Markov probabilities for visualization."""
-    return MARKOV_MODEL
+@app.get("/history")
+def get_flight_history(hours: int = 24):
+    history_file = "data/flight_history.csv"
+    
+    if not os.path.exists(history_file):
+        return {}
+
+    try:
+        # 1. Read the CSV
+        df = pd.read_csv(history_file)
+        
+        # --- FIX: Convert String timestamps to DateTime objects ---
+        # 'utc=False' keeps it as local time (matching your CSV format)
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        
+        # Calculate cutoff time using Pandas Timedelta
+        cutoff_time = pd.Timestamp.now() - pd.Timedelta(hours=hours)
+        
+        print(f"DEBUG: Filtering data after {cutoff_time}")
+        
+        # Filter
+        recent_data = df[df['timestamp'] > cutoff_time]
+        print(f"DEBUG: Found {len(recent_data)} points.")
+        
+        if len(recent_data) == 0:
+            return {}
+
+        # 3. Group
+        paths = {}
+        recent_data = recent_data.sort_values(by=['icao24', 'timestamp'])
+
+        for icao, group in recent_data.groupby('icao24'):
+            if len(group) < 2:
+                continue
+            coords = group[['lat', 'long']].values.tolist()
+            paths[icao] = coords
+
+        return paths
+
+    except Exception as e:
+        print(f"Error processing history: {e}")
+        return {}
+
