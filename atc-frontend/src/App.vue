@@ -213,7 +213,7 @@ const drawGhostPlane = (flight) => {
   if (ghostMarkers[flight.icao24]) {
     // UPDATE EXISTING MARKER (No flicker)
     ghostMarkers[flight.icao24].setLatLng([futureLat, futureLng]);
-    ghostMarkers[flight.icao24].setIcon(createPlaneIcon(rotation, 0.4));
+    ghostMarkers[flight.icao24].setIcon(createPlaneIcon(rotation, 0.5, "#ffcc00"));
   } else {
     // CREATE NEW MARKER
     const ghost = L.marker([futureLat, futureLng], {
