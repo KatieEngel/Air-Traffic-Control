@@ -4,6 +4,7 @@ import axios from "axios";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { KalmanFilter } from './utils/KalmanFilter.js';
+import { checkCollisionRisk } from './utils/CollisionMath.js';
 
 // --- ICONS ---
 const PLANE_ICON_SVG = `
@@ -21,7 +22,12 @@ const predictionLines = {};
 const ghostMarkers = {};
 const selectedPlane = ref(null); // Track which plane is selected (store the icao24 string)
 const showTrendsToggle = ref(false); // track the toggle state
-let trendLayerGroup = null; // Initialize as null, create it in initMap
+let trendLayerGroup = null; // For the path lines - Initialize as null, create it in initMap
+const showCollisionToggle = ref(false); // The Toggle Switch
+const collisionRisks = {}; // Stores "RED", "YELLOW", "SAFE" for each icao24
+let collisionLayerGroup = null; // For the collision lines
+let collisionConnections = []; // store collision lines for animation
+let collisionPucks = []; // Track the active "Pucks" (Safety Zone Circles)
 
 // --- CONFIG ---
 const API_URL = "http://127.0.0.1:8000/flights";
@@ -55,6 +61,24 @@ const getVelocityComponents = (speed, heading, currentLat) => {
   const vLng = Math.sin(rad) * speed * (1 / (111111 * Math.cos(latRad)));
 
   return [vLat, vLng]; 
+};
+
+// Helper: Determines the correct color for a plane based on ALL states
+const getPlaneColor = (icao24) => {
+  // 1. Priority: Selection (Always Gold)
+  if (selectedPlane.value === icao24) {
+    return "#ffcc00"; 
+  }
+
+  // 2. Priority: Collision Risk (Only if Toggle is ON)
+  if (showCollisionToggle.value) {
+    const risk = collisionRisks[icao24];
+    if (risk === "RED") return "#ff0000";
+    if (risk === "YELLOW") return "#ffaa00";
+  }
+
+  // 3. Default: White
+  return "#ffffff";
 };
 
 // Function to display the plane icon at the correct angle
@@ -92,6 +116,8 @@ const initMap = () => {
 
   trendLayerGroup = L.layerGroup().addTo(map.value); // initialize layer grouping for trends
 
+  collisionLayerGroup = L.layerGroup().addTo(map.value); // initialize layer grouping for collision lines
+  
   // DESELECT ON MAP CLICK
   map.value.on('click', () => {
     // 1. If a plane was selected, turn it back to WHITE
@@ -99,8 +125,12 @@ const initMap = () => {
        const oldId = selectedPlane.value;
        const oldFlight = flights.value.find(f => f.icao24 === oldId);
        const oldRotation = oldFlight ? (oldFlight.true_track || 0) : 0;
+
+       // FIX: Clear the selection variable FIRST, then ask for the color
+       selectedPlane.value = null; 
+       const correctColor = getPlaneColor(oldId);
        
-       markers[oldId].setIcon(createPlaneIcon(oldRotation, 1.0, "#ffffff"));
+       markers[oldId].setIcon(createPlaneIcon(oldRotation, 1.0, correctColor));
        markers[oldId].setZIndexOffset(0);
     }
     clearAllVisuals();
@@ -113,39 +143,23 @@ const fetchFlights = async () => {
   try {
     const response = await axios.get(API_URL);
     flights.value = response.data;
+
     updateMap();
+
+    if (showCollisionToggle.value) {
+       runCollisionCheck();
+    } else {
+      if (collisionLayerGroup && collisionLayerGroup.getLayers().length > 0) {
+           collisionLayerGroup.clearLayers();
+           collisionConnections = [];
+           collisionPucks = [];
+       }
+    }
+
   } catch (error) {
     console.error("Error fetching flights:", error);
   }
 };
-
-// // Helper: Draws the prediction line for a single flight
-// const drawPredictionLine = (flight) => {
-//   // 1. Remove existing line for this plane if it exists
-//   if (predictionLines[flight.icao24]) {
-//     map.value.removeLayer(predictionLines[flight.icao24]);
-//     delete predictionLines[flight.icao24];
-//   }
-
-//   // 2. Only draw if this is the SELECTED plane
-//   if (selectedPlane.value !== flight.icao24) return;
-
-//   // 3. Calculate Physics (Same math as before)
-//   const now = Date.now() / 1000;
-//   const [vLat, vLng] = getVelocityComponents(flight.velocity, flight.true_track, flight.lat);
-  
-//   // Re-calculate the adjusted start point (latency comp) so line attaches to nose
-//   const dataTimestamp = flight.time_position || flight.last_contact || now;
-//   const lagSeconds = now - dataTimestamp;
-//   const startLat = flight.lat + (vLat * lagSeconds);
-//   const startLng = flight.long + (vLng * lagSeconds);
-
-//   const PREDICTION_TIME = 60; // 1 minutes
-//   const futureLat = startLat + (vLat * PREDICTION_TIME);
-//   const futureLng = startLng + (vLng * PREDICTION_TIME);
-
-  
-// };
 
 const drawGhostPlane = (flight) => {
   // Only draw if SELECTED
@@ -280,8 +294,9 @@ const updateMap = () => {
       // 1. Calculate Rotation (Default to 0 if missing)
       const rotation = flight.true_track || 0;
 
+      // Determine Base Color
+      const planeColor = getPlaneColor(flight.icao24);
       const isSelected = selectedPlane.value === flight.icao24;
-      const planeColor = isSelected ? "#ffcc00" : "#ffffff"; // Gold vs White
 
       // 2. If marker exists, move it and update rotation
       if (markers[flight.icao24]) {
@@ -325,7 +340,14 @@ const updateMap = () => {
             const oldFlight = flights.value.find(f => f.icao24 === oldId);
             const oldRotation = oldFlight ? (oldFlight.true_track || 0) : 0;
 
-            markers[oldId].setIcon(createPlaneIcon(oldRotation, 1.0, "#ffffff")); // White
+            // FIX: Don't force white. Ask the helper!
+            // We temporarily set selectedPlane to null so the helper doesn't think it's still selected
+            const tempSelection = selectedPlane.value;
+            selectedPlane.value = null; 
+            const correctColor = getPlaneColor(oldId);
+            selectedPlane.value = tempSelection; // Restore just in case
+
+            markers[oldId].setIcon(createPlaneIcon(oldRotation, 1.0, correctColor))
             markers[oldId].setZIndexOffset(0);
           }
 
@@ -355,6 +377,7 @@ const animate = () => {
     const filter = filters[icao24];
     const marker = markers[icao24];
 
+    // --- ANIMATE MARKERS AND PREDICTION LINES ---
     if (filter && marker) {
       // 1. Get the "Target" (Where the math says we should be)
       const targetPos = filter.predict();
@@ -402,6 +425,36 @@ const animate = () => {
       }
     }
   });
+
+  // --- ANIMATE COLLISION LINES ---
+  if (showCollisionToggle.value) {
+    collisionConnections.forEach(connection => {
+      const markerA = markers[connection.planeA];
+      const markerB = markers[connection.planeB];
+
+      // Only draw if both planes still have valid markers on screen
+      if (markerA && markerB) {
+        const posA = markerA.getLatLng();
+        const posB = markerB.getLatLng();
+        
+        // Update line coordinates instantly
+        connection.line.setLatLngs([posA, posB]);
+      }
+    });
+  }
+
+  // --- ANIMATE PUCKS ---
+  if (showCollisionToggle.value) {
+    collisionPucks.forEach(item => {
+      const marker = markers[item.icao];
+      
+      // Only move if the plane marker actually exists on screen
+      if (marker) {
+        const currentPos = marker.getLatLng();
+        item.circle.setLatLng(currentPos);
+      }
+    });
+  }
 };
 
 const toggleTrends = async () => {
@@ -445,6 +498,118 @@ const toggleTrends = async () => {
   }
 };
 
+const runCollisionCheck = () => {
+  // Clear everything regardless of whether the toggle is on or off (because we have to redraw anyway)
+  if (collisionLayerGroup) {
+    collisionLayerGroup.clearLayers();
+  }
+  collisionConnections = [];
+  collisionPucks = [];
+
+  // If the toggle is OFF, STOP immediately.
+  if (!showCollisionToggle.value) {
+    Object.keys(collisionRisks).forEach(key => delete collisionRisks[key]);
+    updateMap(); // Clear the colors from the planes
+    return;      // <--- Stop here!
+  }
+  // 1. Create a lightweight copy for sorting
+  // We only need the data relevant for collision
+  const sortedFlights = [...flights.value].sort((a, b) => a.lat - b.lat);
+  flights.value.forEach(f => collisionRisks[f.icao24] = "SAFE");
+
+  // 2. The "Sweep and Prune" Loop
+  for (let i = 0; i < sortedFlights.length; i++) {
+    const planeA = sortedFlights[i];
+
+    // Inner Loop: Only look forward
+    for (let j = i + 1; j < sortedFlights.length; j++) {
+      const planeB = sortedFlights[j];
+
+      // A. LATITUDE CHECK (The Optimization)
+      const latDiff = planeB.lat - planeA.lat; // We know B > A because it's sorted
+      
+      // If Plane B is more than ~0.15 degrees (approx 10 miles) away in Latitude...
+      // ...then Plane C, D, E will ALSO be too far away.
+      // STOP CHECKING IMMEDIATELY.
+      if (latDiff > 0.15) break;
+
+      // B. LONGITUDE CHECK
+      // Even if Lat is close, Longitude might be far. Check this before doing heavy math.
+      if (Math.abs(planeA.long - planeB.long) > 0.15) continue;
+
+      // C. ALTITUDE CHECK (Vertical Separation)
+      if (Math.abs(planeA.geo_altitude - planeB.geo_altitude) > 300) continue;
+
+      // --- 1. GROUND FILTER (The Fix) ---
+      // If either plane is on the ground, skip the check.
+      // We also check altitude/speed as a backup because 'on_ground' isn't always perfect.
+      const isGroundA = planeA.on_ground || (planeA.geo_altitude < 600 && planeA.velocity < 80);
+      const isGroundB = planeB.on_ground || (planeB.geo_altitude < 600 && planeB.velocity < 80);
+      if (isGroundA || isGroundB) continue;
+
+      // D. THE EXPENSIVE CHECK (Kalman & Future Prediction)
+      // Only runs if planes are physically close in 3D space
+      if (filters[planeA.icao24] && filters[planeB.icao24]) {
+        const risk = checkCollisionRisk(planeA, planeB, filters[planeA.icao24], filters[planeB.icao24]);
+        
+        if (risk === "RED" || risk === "YELLOW") {
+          // Update Risk Dictionary
+          if (risk === "RED") {
+             collisionRisks[planeA.icao24] = "RED";
+             collisionRisks[planeB.icao24] = "RED";
+          } else {
+             if (collisionRisks[planeA.icao24] !== "RED") collisionRisks[planeA.icao24] = "YELLOW";
+             if (collisionRisks[planeB.icao24] !== "RED") collisionRisks[planeB.icao24] = "YELLOW";
+          }
+          // DRAW LINE
+          const color = risk === "RED" ? '#ff0000' : '#ffaa00';
+          const weight = risk === "RED" ? 3 : 2;
+          const dash = risk === "RED" ? null : '5, 10';
+
+          const line = L.polyline([[planeA.lat, planeA.long], [planeB.lat, planeB.long]], {
+             color: color, 
+             weight: weight, 
+             dashArray: dash,
+             opacity: 0.7
+          }).addTo(collisionLayerGroup);
+          
+          // SAVE TO TRACKER (New Step!)
+          collisionConnections.push({
+            line: line,
+            planeA: planeA.icao24,
+            planeB: planeB.icao24
+          });
+
+          // --- DRAW PUCKS ---
+          // We only draw the full "Safety Zone" for RED alerts (Critical)
+          if (risk === "RED") {
+            const createPuck = (plane) => {
+              const puck = L.circle([plane.lat, plane.long], {
+                color: 'transparent',   // No border (cleaner look)
+                fillColor: '#ff0000',   // Red fill
+                fillOpacity: 0.2,       // See-through
+                radius: 4800,           // 3 Miles / 4.8km
+                interactive: false      // Click-through
+              }).addTo(collisionLayerGroup);
+              
+              collisionPucks.push({
+                circle: puck,
+                icao: plane.icao24
+              });
+            };
+
+            // Create pucks for BOTH planes involved
+            createPuck(planeA);
+            createPuck(planeB);
+          }
+        }
+      }
+    }
+  }
+  
+  updateMap();
+};
+
 // --- LIFECYCLE ---
 onMounted(() => {
   initMap();
@@ -466,6 +631,14 @@ onMounted(() => {
         <span class="toggle-label">Show Flight Trends</span>
         <label class="switch">
           <input type="checkbox" v-model="showTrendsToggle" @change="toggleTrends">
+          <span class="slider round"></span>
+        </label>
+      </div>
+
+      <div class="toggle-container">
+        <span class="toggle-label" style="color: #ff4444">Collision View (TCAS)</span>
+        <label class="switch">
+          <input type="checkbox" v-model="showCollisionToggle" @change="runCollisionCheck">
           <span class="slider round"></span>
         </label>
       </div>
