@@ -28,7 +28,7 @@ app = FastAPI()
 # Allows Vue app (running on a different port) to talk to this Python backend.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins (for development only)
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

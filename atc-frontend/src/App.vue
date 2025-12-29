@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref } from "vue";
+import { onMounted, ref, onUnmounted} from "vue";
 import axios from "axios";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
@@ -28,9 +28,15 @@ const collisionRisks = {}; // Stores "RED", "YELLOW", "SAFE" for each icao24
 let collisionLayerGroup = null; // For the collision lines
 let collisionConnections = []; // store collision lines for animation
 let collisionPucks = []; // Track the active "Pucks" (Safety Zone Circles)
+const POLL_INTERVAL = 20; // How often we fetch (seconds)
+const timer = ref(POLL_INTERVAL);
+let intervalId = null;
+let pollingInterval = null; // Store the ID here
 
 // --- CONFIG ---
-const API_URL = "http://127.0.0.1:8000/flights";
+// If we are in production, use the real URL. If local, use localhost.
+const BASE_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+const API_URL = `${BASE_URL}/flights`;
 const REFRESH_RATE = 20000; // 20 seconds (OpenSky limit is strict, be careful!)
 
 // Linear Interpolation: Calculates a point 't' percent between start and end
@@ -40,6 +46,21 @@ const lerp = (start, end, t) => {
 };
 
 // --- FUNCTIONS ---
+
+const startCountdown = () => {
+  // Clear any existing timer to prevent duplicates
+  if (intervalId) clearInterval(intervalId);
+  
+  // Reset the number
+  timer.value = POLL_INTERVAL;
+  
+  // Start counting down every 1 second
+  intervalId = setInterval(() => {
+    if (timer.value > 0) {
+      timer.value--;
+    }
+  }, 1000);
+};
 
 // Helper to convert Speed/Heading to Lat/Lon velocity
 const getVelocityComponents = (speed, heading, currentLat) => {
@@ -105,7 +126,11 @@ const createPlaneIcon = (rotation, opacity = 1.0, color = "#ffffff") => {
 // 1. Initialize the Map
 const initMap = () => {
   // Centered on Long Island, NY with Zoom 9
-  map.value = L.map("mapContainer").setView([40.626, -73.861], 9);
+  map.value = L.map("mapContainer", {
+    minZoom: 6,        // Prevent zooming out too far
+    maxZoom: 18,       // Prevent zooming in too close
+    zoomControl: false // (Optional) hides the +/- buttons if you want a cleaner look
+  }).setView([40.626, -73.861], 9);
 
   // DARK MODE MAP TILES
   L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
@@ -141,6 +166,9 @@ const initMap = () => {
 // 2. Fetch Data from Python Backend
 const fetchFlights = async () => {
   try {
+    // 1. RESET TIMER IMMEDIATELY
+    startCountdown();
+
     const response = await axios.get(API_URL);
     flights.value = response.data;
 
@@ -203,7 +231,21 @@ const drawGhostPlane = (flight) => {
   const PREDICTION_TIME = 60; 
   const futureLat = startLat + (vLat * PREDICTION_TIME);
   const futureLng = startLng + (vLng * PREDICTION_TIME);
-  const rotation = flight.true_track || 0;
+  
+  // --- FIX: CALCULATE ROTATION FROM VELOCITY ---
+  // Instead of trusting the API's 'true_track', we calculate the angle 
+  // of the green line itself.
+  // Math.atan2(x, y) returns radians. We convert to degrees.
+  let rotation = 0;
+  if (Math.abs(vLat) > 0 || Math.abs(vLng) > 0) {
+      // Note: atan2(x, y) gives standard math angle. 
+      // Navigation bearing (0=North, 90=East) requires atan2(lng, lat).
+      rotation = Math.atan2(vLng, vLat) * (180 / Math.PI);
+  } else {
+      // Fallback to API if stationary
+      rotation = flight.true_track || 0;
+  }
+  // ----------------------------------------------
 
   // A. HANDLE THE PREDICTION LINE
   if (predictionLines[flight.icao24]) {
@@ -354,11 +396,15 @@ const updateMap = () => {
           selectedPlane.value = flight.icao24;
 
           // 2. Turn THIS marker Gold immediately
-          const freshRotation = flight.true_track || 0;
-          newMarker.setIcon(createPlaneIcon(freshRotation, 1.0, "#ffcc00"));
+          const latestFlightData = flights.value.find(f => f.icao24 === flight.icao24);
+          const currentRotation = latestFlightData ? (latestFlightData.true_track || 0) : 0;
+          newMarker.setIcon(createPlaneIcon(currentRotation, 1.0, "#ffcc00"));
           newMarker.setZIndexOffset(1000);
 
-          drawGhostPlane(flight);
+          // 4. Draw Ghost (Pass the latest data)
+          if (latestFlightData) {
+             drawGhostPlane(latestFlightData);
+          }
         });
 
         newMarker.addTo(map.value);
@@ -616,9 +662,21 @@ onMounted(() => {
   fetchFlights(); // Initial fetch
 
   // Set up the loop
-  setInterval(fetchFlights, REFRESH_RATE);
+  pollingInterval = setInterval(fetchFlights, POLL_INTERVAL * 1000);
 
   animate();
+});
+
+onUnmounted(() => {
+  if (pollingInterval) {
+    clearInterval(pollingInterval); // Stop the old loop
+    pollingInterval = null;
+  }
+  
+  // Also clean up the countdown timer if needed
+  if (intervalId) {
+    clearInterval(intervalId);
+  }
 });
 </script>
 
@@ -626,6 +684,15 @@ onMounted(() => {
   <div class="app-container">
     <div class="sidebar">
       <h2>Flight List ({{ flights.length }})</h2>
+
+      <div class="sidebar-header">
+        <h2>✈️ Air Traffic</h2>
+        
+        <div class="timer-badge" :class="{ 'refreshing': timer === 0 }">
+          <span v-if="timer > 0">Update in {{ timer }}s</span>
+          <span v-else>Fetching...</span>
+        </div>
+      </div>
 
       <div class="toggle-container">
         <span class="toggle-label">Show Flight Trends</span>
@@ -684,6 +751,43 @@ onMounted(() => {
   scrollbar-width: thin;
   font-family: 'Inter', sans-serif;
   color: #b0b3b8; /* Softer grey text, not pure white */
+}
+
+.sidebar-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid #333;
+}
+
+h2 {
+  margin: 0;
+  font-size: 1.2rem;
+  color: #fff;
+}
+
+/* Timer Badge */
+.timer-badge {
+  background: #2c2c2c;
+  color: #bbb;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  border: 1px solid #444;
+  min-width: 80px;
+  text-align: center;
+  transition: all 0.3s ease;
+}
+
+/* Green Pulse when fetching */
+.timer-badge.refreshing {
+  background: #1b5e20; /* Dark Green */
+  color: #fff;
+  border-color: #4caf50;
+  box-shadow: 0 0 8px rgba(76, 175, 80, 0.4);
 }
 
 .map-view {
