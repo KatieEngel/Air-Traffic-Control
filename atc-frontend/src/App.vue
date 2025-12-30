@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref, onUnmounted} from "vue";
+import { onMounted, ref, onUnmounted, computed} from "vue";
 import axios from "axios";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
@@ -32,6 +32,13 @@ const POLL_INTERVAL = 20; // How often we fetch (seconds)
 const timer = ref(POLL_INTERVAL);
 let intervalId = null;
 let pollingInterval = null; // Store the ID here
+const BBOX = {
+  minLat: 40.038,  // South
+  maxLat: 41.214,  // North
+  minLng: -74.974, // West
+  maxLng: -72.748  // East
+};
+const selectionHistory = ref([]);
 
 // --- CONFIG ---
 // If we are in production, use the real URL. If local, use localhost.
@@ -62,6 +69,31 @@ const startCountdown = () => {
   }, 1000);
 };
 
+// SORTED LIST: Selected plane always jumps to the top
+const sortedFlights = computed(() => {
+  // Create a shallow copy
+  const list = [...flights.value];
+  
+  return list.sort((a, b) => {
+    const indexA = selectionHistory.value.indexOf(a.icao24);
+    const indexB = selectionHistory.value.indexOf(b.icao24);
+
+    // Case 1: Both are in history
+    if (indexA !== -1 && indexB !== -1) {
+      return indexA - indexB; // Lower index (more recent) goes first
+    }
+
+    // Case 2: Only A is in history
+    if (indexA !== -1) return -1;
+
+    // Case 3: Only B is in history
+    if (indexB !== -1) return 1;
+
+    // Case 4: Neither is in history (Keep original order)
+    return 0;
+  });
+});
+
 // Helper to convert Speed/Heading to Lat/Lon velocity
 const getVelocityComponents = (speed, heading, currentLat) => {
   if (!speed || speed === 0) return [0, 0];
@@ -84,23 +116,59 @@ const getVelocityComponents = (speed, heading, currentLat) => {
   return [vLat, vLng]; 
 };
 
+// HELPER: Convert Altitude to Color
+const getAltitudeColor = (alt) => {
+  // 1. Safety check for missing data (Ground/Null)
+  if (!alt || alt < 0) return "#aaaaaa"; // Grey for ground/null
+
+  // 2. Define the ceiling (12,000m is approx 40,000ft)
+  const ceiling = 12000;
+  const floor = 500; // Below this, we treat it as "White/Landing"
+
+  // 3. Ground/Landing Phase (< 500m)
+  if (alt < floor) return "#ffffff"; // Pure White for landing
+
+  // 4. Calculate Ratio (0.0 to 1.0)
+  // We clamp the altitude to the ceiling so 50,000ft doesn't break the math
+  const val = Math.min(alt, ceiling);
+  const ratio = (val - floor) / (ceiling - floor);
+
+  // 5. HSL Calculation
+  // We want to transition from White (Low) to Vivid Purple (High)
+  
+  // Hue: Starts at 190 (Cyan) and goes to 280 (Purple)
+  const hue = 190 + (ratio * 90);
+  
+  // Saturation: Starts at 0% (White) and goes to 100% (Vivid color)
+  const sat = ratio * 100;
+  
+  // Lightness: Starts at 100% (White) and drops to 60% (Bright Color)
+  // We don't go to 50% because we want it to "glow" on the dark map
+  const light = 100 - (ratio * 40);
+
+  return `hsl(${hue}, ${sat}%, ${light}%)`;
+};
+
 // Helper: Determines the correct color for a plane based on ALL states
-const getPlaneColor = (icao24) => {
+const getPlaneColor = (flight) => {
+  if (!flight) return "#ffffff"; // Safety fallback
   // 1. Priority: Selection (Always Gold)
-  if (selectedPlane.value === icao24) {
-    return "#ffcc00"; 
+  if (selectedPlane.value === flight.icao24) {
+    return "#ffcc00"; // Gold
   }
 
   // 2. Priority: Collision Risk (Only if Toggle is ON)
   if (showCollisionToggle.value) {
-    const risk = collisionRisks[icao24];
+    const risk = collisionRisks[flight.icao24];
     if (risk === "RED") return "#ff0000";
     if (risk === "YELLOW") return "#ffaa00";
   }
 
-  // 3. Default: White
-  return "#ffffff";
+  // 3. Altitude gradient (default)
+  return getAltitudeColor(flight.geo_altitude);
 };
+
+
 
 // Function to display the plane icon at the correct angle
 const createPlaneIcon = (rotation, opacity = 1.0, color = "#ffffff") => {
@@ -139,6 +207,43 @@ const initMap = () => {
     maxZoom: 20
   }).addTo(map.value);
 
+  // 1. Define the "World" (Outer Ring)
+  const world = [
+    [90, -180],
+    [90, 180],
+    [-90, 180],
+    [-90, -180]
+  ];
+
+  // 2. Define the "Hole" (Inner Ring - Your BBOX)
+  // Note: We reverse the order for the hole to make the math work (winding order)
+  const hole = [
+    [BBOX.maxLat, BBOX.minLng], // Top Left
+    [BBOX.maxLat, BBOX.maxLng], // Top Right
+    [BBOX.minLat, BBOX.maxLng], // Bottom Right
+    [BBOX.minLat, BBOX.minLng]  // Bottom Left
+  ];
+
+  // 3. Draw the Donut Polygon
+  L.polygon([world, hole], {
+    color: 'transparent', // No outline
+    fillColor: '#000000', // Black fill
+    fillOpacity: 0.65,    // Darken the outside world
+    interactive: false    // Let users click through it (drag map, etc)
+  }).addTo(map.value);
+
+  // 4. Draw a nice Border around the active area
+  L.rectangle(
+    [[BBOX.minLat, BBOX.minLng], [BBOX.maxLat, BBOX.maxLng]], 
+    {
+      color: '#00e5ff', // Cyan Border
+      weight: 1,
+      fill: false,
+      dashArray: '5, 5',
+      opacity: 0.5
+    }
+  ).addTo(map.value);
+
   trendLayerGroup = L.layerGroup().addTo(map.value); // initialize layer grouping for trends
 
   collisionLayerGroup = L.layerGroup().addTo(map.value); // initialize layer grouping for collision lines
@@ -153,7 +258,7 @@ const initMap = () => {
 
        // FIX: Clear the selection variable FIRST, then ask for the color
        selectedPlane.value = null; 
-       const correctColor = getPlaneColor(oldId);
+       const correctColor = getPlaneColor(oldFlight);
        
        markers[oldId].setIcon(createPlaneIcon(oldRotation, 1.0, correctColor));
        markers[oldId].setZIndexOffset(0);
@@ -171,6 +276,15 @@ const fetchFlights = async () => {
 
     const response = await axios.get(API_URL);
     flights.value = response.data;
+
+    // --- NEW: FILTER OUTSIDE PLANES ---
+    // Only keep planes strictly inside the BBOX
+    flights.value = response.data.filter(f => {
+      return f.lat >= BBOX.minLat && 
+             f.lat <= BBOX.maxLat && 
+             f.long >= BBOX.minLng && 
+             f.long <= BBOX.maxLng;
+    });
 
     updateMap();
 
@@ -300,6 +414,63 @@ const clearAllVisuals = (icao24) => {
   for (const key in ghostMarkers) delete ghostMarkers[key];
 };
 
+// UNIFIED SELECTION HANDLER
+// Works for both Map Clicks and Sidebar Clicks
+const selectFlight = (flight) => {
+  // 1. Prevent re-selecting the same plane (optional, but saves performance)
+  if (selectedPlane.value === flight.icao24) return;
+
+  // 2. Clear old Visuals (Lines/Ghosts)
+  clearAllVisuals();
+
+  // --- FIX: CLOSE ANY OPEN POPUPS FIRST ---
+  map.value.closePopup();
+
+  // 3. DESELECT OLD PLANE (Reset Visuals)
+  if (selectedPlane.value && markers[selectedPlane.value]) {
+    const oldId = selectedPlane.value;
+    const oldFlight = flights.value.find(f => f.icao24 === oldId);
+    // Safety check if old flight disappeared
+    const oldRotation = oldFlight ? (oldFlight.true_track || 0) : 0;
+    
+    // Temporarily nullify selection to get the correct "idle" color
+    const temp = selectedPlane.value;
+    selectedPlane.value = null; 
+    const correctColor = getPlaneColor(oldFlight);
+    selectedPlane.value = temp;
+
+    markers[oldId].setIcon(createPlaneIcon(oldRotation, 1.0, correctColor));
+    markers[oldId].setZIndexOffset(0);
+  }
+
+  // 4. UPDATE STATE
+  selectedPlane.value = flight.icao24;
+
+  // --- NEW: UPDATE HISTORY STACK ---
+  // 1. Remove it if it's already in the list (so we don't have duplicates)
+  const index = selectionHistory.value.indexOf(flight.icao24);
+  if (index > -1) {
+    selectionHistory.value.splice(index, 1);
+  }
+  
+  // 2. Add to the FRONT of the array
+  selectionHistory.value.unshift(flight.icao24);
+
+  // 5. HIGHLIGHT NEW PLANE (Gold)
+  if (markers[flight.icao24]) {
+    const rotation = flight.true_track || 0;
+    markers[flight.icao24].setIcon(createPlaneIcon(rotation, 1.0, "#ffcc00"));
+    markers[flight.icao24].setZIndexOffset(1000);
+
+    // --- FIX: MANUALLY OPEN THE NEW POPUP ---
+    markers[flight.icao24].openPopup();
+    
+  }
+
+  // 6. DRAW GHOST/PREDICTION
+  drawGhostPlane(flight);
+};
+
 const updateMap = () => {
   const now = Date.now() / 1000;
 
@@ -337,7 +508,7 @@ const updateMap = () => {
       const rotation = flight.true_track || 0;
 
       // Determine Base Color
-      const planeColor = getPlaneColor(flight.icao24);
+      const planeColor = getPlaneColor(flight);
       const isSelected = selectedPlane.value === flight.icao24;
 
       // 2. If marker exists, move it and update rotation
@@ -351,7 +522,7 @@ const updateMap = () => {
         // Update popup text
         markers[flight.icao24].setPopupContent(`
           <b>${flight.callsign || "Unknown"}</b><br>
-          Alt: ${flight.geo_altitude}m<br>
+          Altitude: ${flight.geo_altitude}m<br>
           Head: ${rotation}°
         `);
       } else {
@@ -363,48 +534,15 @@ const updateMap = () => {
         // Add Popup normally
         newMarker.bindPopup(`
             <b>${flight.callsign || "Unknown"}</b><br>
-            Alt: ${flight.geo_altitude}m
+            Altitude: ${flight.geo_altitude}m
         `);
 
         // Click Handler for Selection
         newMarker.on('click', (e) => {
           // Prevent the map background click from firing immediately
           L.DomEvent.stopPropagation(e);
-          clearAllVisuals(); // Remove lines/ghosts
 
-          // 1. RESET THE *OLD* PLANE TO WHITE
-          // We look up the old ID, find its marker, and reset its icon
-          if (selectedPlane.value && markers[selectedPlane.value]) {
-            const oldId = selectedPlane.value;
-            
-            // We need the old plane's rotation to redraw the icon correctly.
-            // We find it in the current flights list.
-            const oldFlight = flights.value.find(f => f.icao24 === oldId);
-            const oldRotation = oldFlight ? (oldFlight.true_track || 0) : 0;
-
-            // FIX: Don't force white. Ask the helper!
-            // We temporarily set selectedPlane to null so the helper doesn't think it's still selected
-            const tempSelection = selectedPlane.value;
-            selectedPlane.value = null; 
-            const correctColor = getPlaneColor(oldId);
-            selectedPlane.value = tempSelection; // Restore just in case
-
-            markers[oldId].setIcon(createPlaneIcon(oldRotation, 1.0, correctColor))
-            markers[oldId].setZIndexOffset(0);
-          }
-
-          selectedPlane.value = flight.icao24;
-
-          // 2. Turn THIS marker Gold immediately
-          const latestFlightData = flights.value.find(f => f.icao24 === flight.icao24);
-          const currentRotation = latestFlightData ? (latestFlightData.true_track || 0) : 0;
-          newMarker.setIcon(createPlaneIcon(currentRotation, 1.0, "#ffcc00"));
-          newMarker.setZIndexOffset(1000);
-
-          // 4. Draw Ghost (Pass the latest data)
-          if (latestFlightData) {
-             drawGhostPlane(latestFlightData);
-          }
+          selectFlight(flight);
         });
 
         newMarker.addTo(map.value);
@@ -412,6 +550,31 @@ const updateMap = () => {
       }
       // Update the line logic on every refresh (to keep it synced with the plane)
       drawGhostPlane(flight);
+    }
+  });
+
+  // --- GARBAGE COLLECTION ---
+  // Remove markers for planes that are no longer in the flights list
+  Object.keys(markers).forEach(icao24 => {
+    const stillExists = flights.value.find(f => f.icao24 === icao24);
+    
+    if (!stillExists) {
+      // 1. Remove the Marker
+      map.value.removeLayer(markers[icao24]);
+      delete markers[icao24];
+      
+      // 2. Remove the Kalman Filter (Save memory)
+      if (filters[icao24]) delete filters[icao24];
+
+      // 3. Remove Ghost Visuals (if selected)
+      if (predictionLines[icao24]) {
+        map.value.removeLayer(predictionLines[icao24]);
+        delete predictionLines[icao24];
+      }
+      if (ghostMarkers[icao24]) {
+        map.value.removeLayer(ghostMarkers[icao24]);
+        delete ghostMarkers[icao24];
+      }
     }
   });
 };
@@ -683,10 +846,10 @@ onUnmounted(() => {
 <template>
   <div class="app-container">
     <div class="sidebar">
-      <h2>Flight List ({{ flights.length }})</h2>
+      
 
       <div class="sidebar-header">
-        <h2>✈️ Air Traffic</h2>
+        <h2>Air Traffic</h2>
         
         <div class="timer-badge" :class="{ 'refreshing': timer === 0 }">
           <span v-if="timer > 0">Update in {{ timer }}s</span>
@@ -703,7 +866,7 @@ onUnmounted(() => {
       </div>
 
       <div class="toggle-container">
-        <span class="toggle-label" style="color: #ff4444">Collision View (TCAS)</span>
+        <span class="toggle-label" style="color: #ff4444">Collision View</span>
         <label class="switch">
           <input type="checkbox" v-model="showCollisionToggle" @change="runCollisionCheck">
           <span class="slider round"></span>
@@ -711,13 +874,25 @@ onUnmounted(() => {
       </div>
 
       <hr>
+      <h2>Flight List</h2>
 
       <ul>
-        <li v-for="flight in flights" :key="flight.icao24">
-          <strong>{{ flight.callsign || "N/A" }}</strong>
-          <span v-if="!flight.lat" class="warning"> (Locating...)</span>
-          <br />
-          <small>{{ flight.origin_country }}</small>
+        <li 
+          v-for="flight in sortedFlights" 
+          :key="flight.icao24"
+          @click="selectFlight(flight)"
+          :class="{ 'active-row': selectedPlane === flight.icao24 }"
+        >
+          <div class="flight-info">
+            <strong>{{ flight.callsign || "N/A" }}</strong>
+            <br>
+            <small>{{ flight.origin_country }}</small>
+          </div>
+          <div class="flight-stats">
+            <span>Altitude: {{ Math.round(flight.geo_altitude) }}m</span>
+            <br>
+            <span>Velocity: {{ Math.round(flight.velocity) }}m/s</span>
+          </div>
         </li>
       </ul>
     </div>
@@ -827,6 +1002,18 @@ li:hover {
   background: #383838;
   border-color: #555;
   transform: translateX(2px);
+}
+
+/* Active Sidebar Item */
+li.active-row {
+  background: #3a3a3a;      /* Lighter grey background */
+  border-left: 4px solid #ffcc00; /* Gold stripe on the left */
+  transform: translateX(4px); /* Slight pop-out effect */
+}
+
+/* Hover vs Active conflict resolution */
+li.active-row:hover {
+  background: #444; 
 }
 
 /* Warning Text */

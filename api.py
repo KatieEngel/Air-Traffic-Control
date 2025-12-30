@@ -35,8 +35,6 @@ app.add_middleware(
 )
 
 # --- 2. CONFIGURATION ---
-# Replace with your actual credentials
-# (Ideally, use environment variables in the long run)
 CLIENT_ID = os.getenv("OPENSKY_CLIENT_ID")
 CLIENT_SECRET = os.getenv("OPENSKY_CLIENT_SECRET")
 
