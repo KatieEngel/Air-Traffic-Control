@@ -32,13 +32,16 @@ const POLL_INTERVAL = 20; // How often we fetch (seconds)
 const timer = ref(POLL_INTERVAL);
 let intervalId = null;
 let pollingInterval = null; // Store the ID here
-const BBOX = {
+const currentBbox = ref({
   minLat: 40.038,  // South
   maxLat: 41.214,  // North
   minLng: -74.974, // West
   maxLng: -72.748  // East
-};
+});
 const selectionHistory = ref([]);
+let spotlightLayer = null;
+let borderLayer = null;
+let historyLayer = null; // Stores the Cyan history line
 
 // --- CONFIG ---
 // If we are in production, use the real URL. If local, use localhost.
@@ -189,6 +192,91 @@ const createPlaneIcon = (rotation, opacity = 1.0, color = "#ffffff") => {
   });
 };
 
+const drawSpotlight = () => {
+  if (!currentBbox.value) return;
+  // 1. Remove old layers if they exist
+  if (spotlightLayer) map.value.removeLayer(spotlightLayer);
+  if (borderLayer) map.value.removeLayer(borderLayer);
+
+  // 2. Define World vs Hole
+  const world = [[90, -180], [90, 180], [-90, 180], [-90, -180]];
+  const hole = [
+    [currentBbox.value.maxLat, currentBbox.value.minLng], // Top Left
+    [currentBbox.value.maxLat, currentBbox.value.maxLng], // Top Right
+    [currentBbox.value.minLat, currentBbox.value.maxLng], // Bottom Right
+    [currentBbox.value.minLat, currentBbox.value.minLng]  // Bottom Left
+  ];
+
+  // 3. Draw Mask
+  spotlightLayer = L.polygon([world, hole], {
+    color: 'transparent',
+    fillColor: '#000000',
+    fillOpacity: 0.65,
+    interactive: false 
+  }).addTo(map.value);
+
+  // 4. Draw Cyan Border
+  borderLayer = L.rectangle(
+    [[currentBbox.value.minLat, currentBbox.value.minLng], 
+     [currentBbox.value.maxLat, currentBbox.value.maxLng]], 
+    {
+      color: '#00e5ff', 
+      weight: 2,
+      fill: false,
+      dashArray: '10, 5',
+      opacity: 0.8
+    }
+  ).addTo(map.value);
+};
+
+const searchCurrentArea = () => {
+  const bounds = map.value.getBounds();
+  
+  // Update the BBOX state
+  currentBbox.value = {
+    minLat: bounds.getSouth(),
+    maxLat: bounds.getNorth(),
+    minLng: bounds.getWest(),
+    maxLng: bounds.getEast()
+  };
+
+  // Redraw the dark mask to match new area
+  drawSpotlight();
+
+  // Fetch new data!
+  fetchFlights();
+};
+
+const drawFlightHistory = async (icao24) => {
+  // 1. Cleanup old line
+  if (historyLayer) {
+    map.value.removeLayer(historyLayer);
+    historyLayer = null;
+  }
+
+  try {
+    // 2. Fetch from your new backend endpoint
+    // Note: Use backticks ` ` for string interpolation
+    const response = await axios.get(`${BASE_URL}/flight-track/${icao24}`);
+    const path = response.data.path;
+
+    if (path && path.length > 0) {
+      // 3. Draw the Line
+      historyLayer = L.polyline(path, {
+        color: '#00e5ff', // Cyan (Tron style)
+        weight: 3,
+        opacity: 0.8,
+        lineCap: 'round'
+      }).addTo(map.value);
+
+      // Optional: Zoom map to fit the whole path?
+      // map.value.fitBounds(historyLayer.getBounds());
+    }
+  } catch (error) {
+    console.error("Could not fetch history:", error);
+  }
+};
+
 // --- CORE FUNCTIONS ---
 
 // 1. Initialize the Map
@@ -200,49 +288,14 @@ const initMap = () => {
     zoomControl: false // (Optional) hides the +/- buttons if you want a cleaner look
   }).setView([40.626, -73.861], 9);
 
+  setTimeout(() => { map.value.invalidateSize(); }, 100);
+
   // DARK MODE MAP TILES
   L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
     subdomains: 'abcd',
     maxZoom: 20
   }).addTo(map.value);
-
-  // 1. Define the "World" (Outer Ring)
-  const world = [
-    [90, -180],
-    [90, 180],
-    [-90, 180],
-    [-90, -180]
-  ];
-
-  // 2. Define the "Hole" (Inner Ring - Your BBOX)
-  // Note: We reverse the order for the hole to make the math work (winding order)
-  const hole = [
-    [BBOX.maxLat, BBOX.minLng], // Top Left
-    [BBOX.maxLat, BBOX.maxLng], // Top Right
-    [BBOX.minLat, BBOX.maxLng], // Bottom Right
-    [BBOX.minLat, BBOX.minLng]  // Bottom Left
-  ];
-
-  // 3. Draw the Donut Polygon
-  L.polygon([world, hole], {
-    color: 'transparent', // No outline
-    fillColor: '#000000', // Black fill
-    fillOpacity: 0.65,    // Darken the outside world
-    interactive: false    // Let users click through it (drag map, etc)
-  }).addTo(map.value);
-
-  // 4. Draw a nice Border around the active area
-  L.rectangle(
-    [[BBOX.minLat, BBOX.minLng], [BBOX.maxLat, BBOX.maxLng]], 
-    {
-      color: '#00e5ff', // Cyan Border
-      weight: 1,
-      fill: false,
-      dashArray: '5, 5',
-      opacity: 0.5
-    }
-  ).addTo(map.value);
 
   trendLayerGroup = L.layerGroup().addTo(map.value); // initialize layer grouping for trends
 
@@ -266,6 +319,8 @@ const initMap = () => {
     clearAllVisuals();
     selectedPlane.value = null;
   });
+
+  drawSpotlight();
 };
 
 // 2. Fetch Data from Python Backend
@@ -274,17 +329,16 @@ const fetchFlights = async () => {
     // 1. RESET TIMER IMMEDIATELY
     startCountdown();
 
-    const response = await axios.get(API_URL);
-    flights.value = response.data;
+    // Pass the coordinates as Query Parameters
+    const params = {
+      min_lat: currentBbox.value.minLat,
+      max_lat: currentBbox.value.maxLat,
+      min_long: currentBbox.value.minLng,
+      max_long: currentBbox.value.maxLng
+    };
 
-    // --- NEW: FILTER OUTSIDE PLANES ---
-    // Only keep planes strictly inside the BBOX
-    flights.value = response.data.filter(f => {
-      return f.lat >= BBOX.minLat && 
-             f.lat <= BBOX.maxLat && 
-             f.long >= BBOX.minLng && 
-             f.long <= BBOX.maxLng;
-    });
+    const response = await axios.get(API_URL, { params });
+    flights.value = response.data;
 
     updateMap();
 
@@ -412,6 +466,11 @@ const clearAllVisuals = (icao24) => {
   });
   // Reset the object
   for (const key in ghostMarkers) delete ghostMarkers[key];
+
+  if (historyLayer) {
+    map.value.removeLayer(historyLayer);
+    historyLayer = null;
+  }
 };
 
 // UNIFIED SELECTION HANDLER
@@ -469,6 +528,7 @@ const selectFlight = (flight) => {
 
   // 6. DRAW GHOST/PREDICTION
   drawGhostPlane(flight);
+  drawFlightHistory(flight.icao24);
 };
 
 const updateMap = () => {
@@ -822,6 +882,7 @@ const runCollisionCheck = () => {
 // --- LIFECYCLE ---
 onMounted(() => {
   initMap();
+
   fetchFlights(); // Initial fetch
 
   // Set up the loop
@@ -897,7 +958,13 @@ onUnmounted(() => {
       </ul>
     </div>
 
-    <div id="mapContainer" class="map-view"></div>
+    <div class="map-view">
+      <div id="mapContainer"></div>
+      
+      <button class="search-btn" @click="searchCurrentArea">
+        Search This Area 🔍
+      </button>
+    </div>
   </div>
 </template>
 
@@ -965,9 +1032,18 @@ h2 {
   box-shadow: 0 0 8px rgba(76, 175, 80, 0.4);
 }
 
+#mapContainer {
+  width: 100%;
+  height: 100vh; /* Takes up full screen height */
+  background: #000; /* Fallback color so you see if it loads */
+  z-index: 0;
+}
+
+/* Ensure the parent container also has height if needed */
 .map-view {
-  flex-grow: 1;
-  height: 100%;
+  height: 100vh;
+  width: 100vw;
+  position: relative; /* Needed for the absolute position button */
 }
 
 /* 3. List Items: Card Style */
@@ -1076,6 +1152,34 @@ input:checked + .slider {
 
 input:checked + .slider:before {
   transform: translateX(22px);
+}
+
+.search-btn {
+  position: absolute;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%); /* Center perfectly */
+  z-index: 1000; /* Above the map */
+  
+  background: #00e5ff; /* Cyan */
+  color: #000;
+  border: none;
+  padding: 10px 20px;
+  border-radius: 20px;
+  font-weight: bold;
+  font-family: 'Inter', sans-serif;
+  cursor: pointer;
+  box-shadow: 0 4px 15px rgba(0, 229, 255, 0.4);
+  transition: all 0.2s ease;
+}
+
+.search-btn:hover {
+  transform: translateX(-50%) scale(1.05);
+  background: #fff;
+}
+
+.search-btn:active {
+  transform: translateX(-50%) scale(0.95);
 }
 
 /* Remove Leaflet icon background */

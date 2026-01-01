@@ -48,15 +48,6 @@ if not CLIENT_ID or not CLIENT_SECRET:
 # SET THIS TO FALSE TO COLLECT DATA (LONG ISLAND)
 TEST_MODE = False
 
-if TEST_MODE:
-    # Switzerland Coordinates (Matches your training data)
-    LAT_MIN, LAT_MAX = 45.818, 47.808
-    LON_MIN, LON_MAX = 5.956, 10.492
-else:
-    # Long Island Coordinates
-    LON_MIN, LAT_MIN = -74.974, 40.038
-    LON_MAX, LAT_MAX = -72.748, 41.214
-
 # --- 3. HELPER FUNCTIONS ---
 
 # logging flight data for training markov model
@@ -140,15 +131,23 @@ def home():
     return {"message": "ATC Backend is running!"}
 
 @app.get("/flights")
-def get_flights(background_tasks: BackgroundTasks):
+def get_flights(
+    background_tasks: BackgroundTasks,
+    min_lat: float = 40.45, 
+    max_lat: float = 41.30, 
+    min_long: float = -74.30, 
+    max_long: float = -71.80
+):
     """
     Fetches live flight data, cleans it, and returns it as JSON.
     """
+
     token = get_opensky_token()
     if not token:
         raise HTTPException(status_code=500, detail="Failed to authenticate with OpenSky")
 
-    api_url = f'https://opensky-network.org/api/states/all?lamin={LAT_MIN}&lomin={LON_MIN}&lamax={LAT_MAX}&lomax={LON_MAX}'
+    # FIX: Use the parameters (min_lat, etc.) instead of hardcoded LAT_MIN globals
+    api_url = f'https://opensky-network.org/api/states/all?lamin={min_lat}&lomin={min_long}&lamax={max_lat}&lomax={max_long}'
     headers = {"Authorization": f"Bearer {token}"}
 
     try:
@@ -234,3 +233,36 @@ def get_flight_history(hours: int = 24):
         print(f"Error processing history: {e}")
         return {}
 
+@app.get("/flight-track/{icao24}")
+def get_flight_track(icao24: str):
+    token = get_opensky_token()
+    if not token:
+        raise HTTPException(status_code=500, detail="Auth failed")
+
+    # OpenSky /tracks endpoint
+    # "time=0" asks for the track of the current active flight
+    url = f"https://opensky-network.org/api/tracks/?icao24={icao24}&time=0"
+    headers = {"Authorization": f"Bearer {token}"}
+
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        # 404 means no track available (common for ground planes)
+        if response.status_code == 404:
+            return {"path": []}
+            
+        response.raise_for_status()
+        data = response.json()
+        
+        # OpenSky returns data as: {'path': [[time, lat, lon, alt, heading, on_ground], ...]}
+        # We only need lat/lon for the map
+        raw_path = data.get('path', [])
+        
+        # Clean it up: simple list of [lat, long]
+        clean_path = [[p[1], p[2]] for p in raw_path]
+        
+        return {"path": clean_path}
+
+    except requests.exceptions.RequestException as e:
+        print(f"Track Error: {e}")
+        return {"path": []}
