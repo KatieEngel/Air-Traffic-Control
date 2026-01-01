@@ -362,15 +362,12 @@ const drawGhostPlane = (flight) => {
   if (selectedPlane.value !== flight.icao24) return;
 
   let vLat, vLng, startLat, startLng;
-  const now = Date.now() / 1000;
 
-  // Check if we have a Kalman Filter for this plane (We should!)
+  // GET DATA (Kalman or fallback)
   if (filters[flight.icao24]) {
     // USE THE FILTER'S MEMORY (Robust against missing API data)
     vLat = filters[flight.icao24].x[2];
     vLng = filters[flight.icao24].x[3];
-    
-    // We can also use the filter's smoothed position as the start point
     startLat = filters[flight.icao24].x[0];
     startLng = filters[flight.icao24].x[1];
   } else {
@@ -380,10 +377,9 @@ const drawGhostPlane = (flight) => {
     startLng = flight.long;
   }
 
-  // If velocity is basically zero...
+  // Check if moving
   if (Math.abs(vLat) < 0.000001 && Math.abs(vLng) < 0.000001) {
-    
-    // ...we must REMOVE any existing visuals so they don't get stuck...
+    // Cleanup if stopped
     if (predictionLines[flight.icao24]) {
       map.value.removeLayer(predictionLines[flight.icao24]);
       delete predictionLines[flight.icao24];
@@ -400,42 +396,31 @@ const drawGhostPlane = (flight) => {
   const futureLat = startLat + (vLat * PREDICTION_TIME);
   const futureLng = startLng + (vLng * PREDICTION_TIME);
   
-  // --- FIX: CALCULATE ROTATION FROM VELOCITY ---
-  // Instead of trusting the API's 'true_track', we calculate the angle 
-  // of the green line itself.
-  // Math.atan2(x, y) returns radians. We convert to degrees.
-  let rotation = 0;
-  if (Math.abs(vLat) > 0 || Math.abs(vLng) > 0) {
-      // Note: atan2(x, y) gives standard math angle. 
-      // Navigation bearing (0=North, 90=East) requires atan2(lng, lat).
-      rotation = Math.atan2(vLng, vLat) * (180 / Math.PI);
-  } else {
-      // Fallback to API if stationary
-      rotation = flight.true_track || 0;
-  }
-  // ----------------------------------------------
+  // DRAW LINE
+  const latLngs = [[startLat, startLng], [futureLat, futureLng]];
 
-  // A. HANDLE THE PREDICTION LINE
   if (predictionLines[flight.icao24]) {
     // UPDATE EXISTING LINE (No flicker)
-    predictionLines[flight.icao24].setLatLngs([
-      [startLat, startLng],
-      [futureLat, futureLng]
-    ]);
+    predictionLines[flight.icao24].setLatLngs(latLngs);
   } else {
-    // LINE
-    const line = L.polyline([[startLat, startLng], [futureLat, futureLng]], {
+    predictionLines[flight.icao24] = L.polyline(latLngs, {
       color: "#ffcc00",  // Gold/Amber
       weight: 2,
-      opacity: 0.9,
-      dashArray: "4, 8", // Sparse dots look more "predictive"
+      opacity: 0.7,
+      dashArray: "5, 10", // Sparse dots look more "predictive"
     }).addTo(map.value);
-    predictionLines[flight.icao24] = line;
   }
+
+  // CALCULATE ROTATION (Velocity Based + Cosine Corrected)
+  // We use the velocity vector (vLat, vLng) because that is the 'Truth' of the ghost path.
+  const latRad = startLat * (Math.PI / 180);
+  
+  // atan2(lng, lat) gives standard navigation angle (0 = North)
+  // vLng * cos(lat) fixes the "squashed map" projection issue
+  const rotation = Math.atan2(vLng * Math.cos(latRad), vLat) * (180 / Math.PI);
 
   // B. HANDLE THE GHOST MARKER
   if (ghostMarkers[flight.icao24]) {
-    // UPDATE EXISTING MARKER (No flicker)
     ghostMarkers[flight.icao24].setLatLng([futureLat, futureLng]);
     ghostMarkers[flight.icao24].setIcon(createPlaneIcon(rotation, 0.5, "#ffcc00"));
   } else {
@@ -478,14 +463,11 @@ const clearAllVisuals = (icao24) => {
 const selectFlight = (flight) => {
   // 1. Prevent re-selecting the same plane (optional, but saves performance)
   if (selectedPlane.value === flight.icao24) return;
-
-  // 2. Clear old Visuals (Lines/Ghosts)
+  
   clearAllVisuals();
-
-  // --- FIX: CLOSE ANY OPEN POPUPS FIRST ---
   map.value.closePopup();
 
-  // 3. DESELECT OLD PLANE (Reset Visuals)
+  // DESELECT OLD PLANE (Reset Visuals)
   if (selectedPlane.value && markers[selectedPlane.value]) {
     const oldId = selectedPlane.value;
     const oldFlight = flights.value.find(f => f.icao24 === oldId);
@@ -502,31 +484,31 @@ const selectFlight = (flight) => {
     markers[oldId].setZIndexOffset(0);
   }
 
-  // 4. UPDATE STATE
+  // UPDATE STATE
   selectedPlane.value = flight.icao24;
 
-  // --- NEW: UPDATE HISTORY STACK ---
-  // 1. Remove it if it's already in the list (so we don't have duplicates)
+  // UPDATE HISTORY STACK ---
+  // Remove it if it's already in the list (so we don't have duplicates)
   const index = selectionHistory.value.indexOf(flight.icao24);
   if (index > -1) {
     selectionHistory.value.splice(index, 1);
   }
   
-  // 2. Add to the FRONT of the array
+  // Add to the FRONT of the array
   selectionHistory.value.unshift(flight.icao24);
 
-  // 5. HIGHLIGHT NEW PLANE (Gold)
+  // HIGHLIGHT NEW PLANE (Gold)
   if (markers[flight.icao24]) {
-    const rotation = flight.true_track || 0;
-    markers[flight.icao24].setIcon(createPlaneIcon(rotation, 1.0, "#ffcc00"));
-    markers[flight.icao24].setZIndexOffset(1000);
+    const marker = markers[flight.icao24];
 
-    // --- FIX: MANUALLY OPEN THE NEW POPUP ---
-    markers[flight.icao24].openPopup();
-    
+    const visualRotation = marker.currentRotation || flight.true_track || 0;
+
+    marker.setIcon(createPlaneIcon(visualRotation, 1.0, "#ffcc00"));
+    marker.setZIndexOffset(1000);
+    marker.openPopup();
   }
 
-  // 6. DRAW GHOST/PREDICTION
+  // DRAW GHOST/PREDICTION
   drawGhostPlane(flight);
   drawFlightHistory(flight.icao24);
 };
@@ -537,79 +519,94 @@ const updateMap = () => {
   flights.value.forEach((flight) => {
     if (flight.lat && flight.long) {
 
-      // Calculate initial velocity estimate
-      // Use true_track (heading) and velocity (speed)
+      // --- 1. PHYSICS ENGINE (Kalman Filter) ---
       const [vLat, vLng] = getVelocityComponents(flight.velocity, flight.true_track, flight.lat);
-
-      // How old is this data? (Current Time - GPS Time)
-      // If time_position is missing, assume 0 lag (fallback)
       const dataTimestamp = flight.time_position || flight.last_contact || now;
       const lagSeconds = now - dataTimestamp;
 
-      // Project the position forward to "Now"
-      // If data is 5s old, move the plane 5s worth of travel forward
+      // Project position
       let adjustedLat = flight.lat + (vLat * lagSeconds);
       let adjustedLng = flight.long + (vLng * lagSeconds);
 
-      // If filter doesn't exist, create it
+      // Update filter
       if (!filters[flight.icao24]) {
         filters[flight.icao24] = new KalmanFilter(adjustedLat, adjustedLng, vLat, vLng);
       } 
-    
-      // Update with the ADJUSTED position (Real-time estimate)
       filters[flight.icao24].update(adjustedLat, adjustedLng);
-
-      // 2. FORCE Update the Velocity (Stop the "Fly Away" bug)
-      // This tells the filter: "I don't care what you calculated, THIS is the real speed."
       filters[flight.icao24].setVelocity(vLat, vLng);
 
-      // Flight marker:
-      // 1. Calculate Rotation (Default to 0 if missing)
-      const rotation = flight.true_track || 0;
+      // --- 2. ROTATION CALCULATION ---
+      let rotation = flight.true_track;
+      
+      if (rotation === null || rotation === undefined) {
+         // Fallback: If we have history, keep the old one to prevent jitter
+         if (markers[flight.icao24] && markers[flight.icao24].currentRotation) {
+            rotation = markers[flight.icao24].currentRotation;
+         } else if (filters[flight.icao24]) {
+            // Calculate from Kalman velocity with Cosine Correction
+            const vx = filters[flight.icao24].x[2];
+            const vy = filters[flight.icao24].x[3];
+            const latRad = flight.lat * (Math.PI / 180);
+            rotation = Math.atan2(vy * Math.cos(latRad), vx) * (180 / Math.PI);
+         } else {
+            rotation = 0;
+         }
+      }
 
-      // Determine Base Color
+      // --- 3. COLOR & STATE ---
       const planeColor = getPlaneColor(flight);
       const isSelected = selectedPlane.value === flight.icao24;
 
-      // 2. If marker exists, move it and update rotation
+      // --- 4. MARKER UPDATE / CREATION (Merged Logic) ---
       if (markers[flight.icao24]) {
-        // Update the icon rotation
-        markers[flight.icao24].setIcon(createPlaneIcon(rotation, 1.0, planeColor));
+        // A. UPDATE EXISTING
+        const marker = markers[flight.icao24];
 
-        // Fix z-index: Selected plane should always be on TOP of others
-        markers[flight.icao24].setZIndexOffset(isSelected ? 1000 : 0);
+        // Update Icon & Rotation
+        marker.setIcon(createPlaneIcon(rotation, 1.0, planeColor));
+        marker.currentRotation = rotation; // Save for click handler
 
-        // Update popup text
-        markers[flight.icao24].setPopupContent(`
+        // Update Z-Index (Selected goes on top)
+        marker.setZIndexOffset(isSelected ? 1000 : 0);
+
+        // Update Popup Text (Live updates!)
+        marker.setPopupContent(`
           <b>${flight.callsign || "Unknown"}</b><br>
-          Altitude: ${flight.geo_altitude}m<br>
-          Head: ${rotation}°
+          Altitude: ${Math.round(flight.geo_altitude)}m<br>
+          Speed: ${Math.round(flight.velocity)}m/s
         `);
+
       } else {
-        // 3. Create new marker with the icon
+        // B. CREATE NEW
         const newMarker = L.marker([flight.lat, flight.long], {
           icon: createPlaneIcon(rotation, 1.0, planeColor),
         });
+        
+        // Save Rotation
+        newMarker.currentRotation = rotation;
 
-        // Add Popup normally
+        // Bind Popup (Static structure)
         newMarker.bindPopup(`
-            <b>${flight.callsign || "Unknown"}</b><br>
-            Altitude: ${flight.geo_altitude}m
+           <b>${flight.callsign || "Unknown"}</b><br>
+           Altitude: ${Math.round(flight.geo_altitude)}m<br>
+           Speed: ${Math.round(flight.velocity)}m/s
         `);
 
-        // Click Handler for Selection
+        // Add Click Listener
         newMarker.on('click', (e) => {
-          // Prevent the map background click from firing immediately
           L.DomEvent.stopPropagation(e);
-
           selectFlight(flight);
         });
 
         newMarker.addTo(map.value);
         markers[flight.icao24] = newMarker;
       }
-      // Update the line logic on every refresh (to keep it synced with the plane)
-      drawGhostPlane(flight);
+
+      // --- 5. UPDATE GHOST PLANE ---
+      // If this plane is selected, ensure the ghost stays synced
+      if (isSelected) {
+         drawGhostPlane(flight);
+      }
     }
   });
 
@@ -617,7 +614,6 @@ const updateMap = () => {
   // Remove markers for planes that are no longer in the flights list
   Object.keys(markers).forEach(icao24 => {
     const stillExists = flights.value.find(f => f.icao24 === icao24);
-    
     if (!stillExists) {
       // 1. Remove the Marker
       map.value.removeLayer(markers[icao24]);
