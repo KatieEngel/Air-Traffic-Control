@@ -113,7 +113,7 @@ def get_opensky_token():
             TOKEN_URL,
             auth=HTTPBasicAuth(CLIENT_ID, CLIENT_SECRET),
             data={'grant_type': 'client_credentials'},
-            timeout=5
+            timeout=20
         )
         response.raise_for_status()
         return response.json().get("access_token")

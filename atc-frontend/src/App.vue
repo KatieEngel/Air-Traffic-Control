@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref, onUnmounted, computed} from "vue";
+import { onMounted, ref, onUnmounted, computed, watch} from "vue";
 import axios from "axios";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
@@ -22,7 +22,6 @@ const predictionLines = {};
 const ghostMarkers = {};
 const selectedPlane = ref(null); // Track which plane is selected (store the icao24 string)
 const showTrendsToggle = ref(false); // track the toggle state
-let trendLayerGroup = null; // For the path lines - Initialize as null, create it in initMap
 const showCollisionToggle = ref(false); // The Toggle Switch
 const collisionRisks = {}; // Stores "RED", "YELLOW", "SAFE" for each icao24
 let collisionLayerGroup = null; // For the collision lines
@@ -42,6 +41,9 @@ const selectionHistory = ref([]);
 let spotlightLayer = null;
 let borderLayer = null;
 let historyLayer = null; // Stores the Cyan history line
+const breadcrumbs = {}; 
+const trailLayers = {}; // Store the Polyline objects
+const lastTrailUpdate = {}; // Timing: { icao24: timestamp } to control update speed
 
 // --- CONFIG ---
 // If we are in production, use the real URL. If local, use localhost.
@@ -243,6 +245,13 @@ const searchCurrentArea = () => {
   // Redraw the dark mask to match new area
   drawSpotlight();
 
+  // WIPE ALL TRAILS
+  Object.keys(trailLayers).forEach(key => {
+     map.value.removeLayer(trailLayers[key]);
+     delete trailLayers[key];
+  });
+  Object.keys(breadcrumbs).forEach(key => delete breadcrumbs[key]);
+
   // Fetch new data!
   fetchFlights();
 };
@@ -277,6 +286,19 @@ const drawFlightHistory = async (icao24) => {
   }
 };
 
+watch(showTrendsToggle, (newVal) => {
+  if (!newVal) {
+    // 1. CLEAR EVERYTHING when toggled OFF
+    Object.keys(trailLayers).forEach(key => {
+        if (map.value && trailLayers[key]) {
+            map.value.removeLayer(trailLayers[key]);
+        }
+    });
+    // 2. Delete the Layer Objects (So 'animate' knows to recreate them)
+    Object.keys(trailLayers).forEach(key => delete trailLayers[key]);
+  }
+});
+
 // --- CORE FUNCTIONS ---
 
 // 1. Initialize the Map
@@ -296,8 +318,6 @@ const initMap = () => {
     subdomains: 'abcd',
     maxZoom: 20
   }).addTo(map.value);
-
-  trendLayerGroup = L.layerGroup().addTo(map.value); // initialize layer grouping for trends
 
   collisionLayerGroup = L.layerGroup().addTo(map.value); // initialize layer grouping for collision lines
   
@@ -323,6 +343,7 @@ const initMap = () => {
   drawSpotlight();
 };
 
+const isApiDown = ref(false);
 // 2. Fetch Data from Python Backend
 const fetchFlights = async () => {
   try {
@@ -338,8 +359,9 @@ const fetchFlights = async () => {
     };
 
     const response = await axios.get(API_URL, { params });
+    
+    isApiDown.value = false;
     flights.value = response.data;
-
     updateMap();
 
     if (showCollisionToggle.value) {
@@ -354,6 +376,10 @@ const fetchFlights = async () => {
 
   } catch (error) {
     console.error("Error fetching flights:", error);
+    // Check if it's a 503 (Server Error)
+    if (error.response && error.response.status === 503) {
+       isApiDown.value = true; // Trigger the UI warning
+    }
   }
 };
 
@@ -590,7 +616,9 @@ const updateMap = () => {
            <b>${flight.callsign || "Unknown"}</b><br>
            Altitude: ${Math.round(flight.geo_altitude)}m<br>
            Speed: ${Math.round(flight.velocity)}m/s
-        `);
+        `, {
+           autoPan: false
+        });
 
         // Add Click Listener
         newMarker.on('click', (e) => {
@@ -631,6 +659,13 @@ const updateMap = () => {
         map.value.removeLayer(ghostMarkers[icao24]);
         delete ghostMarkers[icao24];
       }
+      // REMOVE LIVE TRAIL
+      if (trailLayers[icao24]) {
+        map.value.removeLayer(trailLayers[icao24]);
+        delete trailLayers[icao24];
+      }
+      if (breadcrumbs[icao24]) delete breadcrumbs[icao24];
+      if (lastTrailUpdate[icao24]) delete lastTrailUpdate[icao24];
     }
   });
 };
@@ -638,39 +673,37 @@ const updateMap = () => {
 const animate = () => {
   requestAnimationFrame(animate);
 
+  // 1. HELPER: Define the style in ONE place
+  const createTrail = (latLngs) => {
+    return L.polyline(latLngs, {
+      className: 'flight-trail-line',
+      color: '#4fc3f7', 
+      weight: 2,       
+      opacity: 0.6,
+      dashArray: '4, 8', // <--- Dotted Style (4px dash, 8px gap)
+      smoothFactor: 2.0 
+    });
+  };
+
   Object.keys(markers).forEach(icao24 => {
     const filter = filters[icao24];
     const marker = markers[icao24];
 
     // --- ANIMATE MARKERS AND PREDICTION LINES ---
     if (filter && marker) {
-      // 1. Get the "Target" (Where the math says we should be)
       const targetPos = filter.predict();
-      
-      // 2. Get the "Current" (Where the icon actually is)
       const currentLatLng = marker.getLatLng();
-      
-      // 3. LERP: Move 5% of the way towards the target per frame
-      // Lower number (0.01) = Very slow/smooth "drift"
-      // Higher number (0.1) = Snappier response
       const SMOOTHING_FACTOR = 0.05; 
       
       const newLat = lerp(currentLatLng.lat, targetPos.lat, SMOOTHING_FACTOR);
       const newLng = lerp(currentLatLng.lng, targetPos.lng, SMOOTHING_FACTOR);
       
-      // Update the marker
       marker.setLatLng([newLat, newLng]);
 
       // UPDATE PREDICTION VISUALS (If this plane is selected)
       if (selectedPlane.value === icao24) {
-        
-        // Retrieve velocity from the Kalman Filter state
-        // x[2] is vLat, x[3] is vLng
         const vLat = filter.x[2];
         const vLng = filter.x[3];
-
-        // Calculate Future Position (60 seconds from NOW)
-        // We use 'newLat'/'newLng' so the line stays attached to the plane's nose
         const PREDICTION_TIME = 60;
         const futureLat = newLat + (vLat * PREDICTION_TIME);
         const futureLng = newLng + (vLng * PREDICTION_TIME);
@@ -686,6 +719,49 @@ const animate = () => {
             [newLat, newLng],       // Start at plane
             [futureLat, futureLng]  // End at ghost
           ]);
+        }
+      }
+    }
+
+    // Only run if Toggle is ON and the plane actually exists
+    if (showTrendsToggle.value && markers[icao24]) {
+      const pos = markers[icao24].getLatLng();
+      
+      // Initialize array
+      if (!breadcrumbs[icao24]) breadcrumbs[icao24] = [];
+      const trail = breadcrumbs[icao24];
+
+      // RESTORE OLD TRAIL
+      if (trail.length > 0 && !trailLayers[icao24]) {
+          trailLayers[icao24] = createTrail(trail).addTo(map.value);
+      }
+
+      let shouldAdd = false;
+      if (trail.length === 0) {
+        shouldAdd = true;
+      } else {
+        const lastPoint = trail[trail.length - 1];
+        // Calculate distance
+        const dist = Math.sqrt(
+          Math.pow(pos.lat - lastPoint[0], 2) + 
+          Math.pow(pos.lng - lastPoint[1], 2)
+        );
+        // Threshold: roughly 0.0005 degrees is ~50 meters
+        if (dist > 0.0005) {
+          shouldAdd = true;
+        }
+      }
+
+      // ADD NEW POINT
+      if (shouldAdd) {
+        trail.push([pos.lat, pos.lng]);
+        if (trail.length > 50) trail.shift();
+
+        // DRAW THE LINE
+        if (trailLayers[icao24]) {
+          trailLayers[icao24].setLatLngs(trail);
+        } else {
+          trailLayers[icao24] = createTrail(trail).addTo(map.value);
         }
       }
     }
@@ -719,47 +795,6 @@ const animate = () => {
         item.circle.setLatLng(currentPos);
       }
     });
-  }
-};
-
-const toggleTrends = async () => {
-  if (showTrendsToggle.value) {
-    try {
-      console.log("Fetching flight history...");
-      
-      // Request the last 24 hours of data
-      const response = await axios.get("http://127.0.0.1:8000/history?hours=24");
-      const historyPaths = response.data;
-      
-      trendLayerGroup.clearLayers();
-      
-      let count = 0;
-
-      // Loop through each plane's path
-      for (const [icao, path] of Object.entries(historyPaths)) {
-        
-        // Create a Polyline for this flight
-        const line = L.polyline(path, {
-          color: '#00e5ff',    // Cyan / Electric Blue
-          weight: 1.5,         // Thinner lines look more elegant
-          opacity: 0.4,
-          className: 'history-line' 
-        });
-
-        // Add a tooltip so you can see which plane it was
-        line.bindTooltip(icao, { sticky: true });
-
-        trendLayerGroup.addLayer(line);
-        count++;
-      }
-      
-      console.log(`Drew ${count} historical flight paths.`);
-
-    } catch (e) {
-      console.error("Error loading history", e);
-    }
-  } else {
-    trendLayerGroup.clearLayers();
   }
 };
 
@@ -903,19 +938,21 @@ onUnmounted(() => {
 <template>
   <div class="app-container">
     <div class="sidebar">
-      
+      <div v-if="isApiDown" class="error-badge">
+          OpenSky Systems Busy
+      </div>
 
       <div class="sidebar-header">
         <h2>Air Traffic</h2>
-        
         <div class="timer-badge" :class="{ 'refreshing': timer === 0 }">
           <span v-if="timer > 0">Update in {{ timer }}s</span>
           <span v-else>Fetching...</span>
         </div>
+        
       </div>
 
       <div class="toggle-container">
-        <span class="toggle-label">Show Flight Trends</span>
+        <span class="toggle-label">Show Live Trails</span>
         <label class="switch">
           <input type="checkbox" v-model="showTrendsToggle" @change="toggleTrends">
           <span class="slider round"></span>
@@ -1026,6 +1063,24 @@ h2 {
   color: #fff;
   border-color: #4caf50;
   box-shadow: 0 0 8px rgba(76, 175, 80, 0.4);
+}
+
+.error-badge {
+  background: #d32f2f; /* Red */
+  color: white;
+  padding: 8px;
+  border-radius: 4px;
+  text-align: center;
+  margin-bottom: 10px;
+  font-size: 0.8rem;
+  font-weight: bold;
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0% { opacity: 1; }
+  50% { opacity: 0.7; }
+  100% { opacity: 1; }
 }
 
 #mapContainer {
@@ -1195,6 +1250,13 @@ input:checked + .slider:before {
 /* Make the history lines blend together */
 :deep(.history-line) {
   mix-blend-mode: screen; /* On dark maps, this makes overlaps glow white */
+}
+
+/* FORCE DOTTED LINES */
+/* Target the SVG path element created by Leaflet */
+:deep(.flight-trail-line) {
+  stroke-dasharray: 4, 8 !important; /* 4px line, 8px gap */
+  stroke-linecap: round; /* Makes the dots look like little pills */
 }
 </style>
 
