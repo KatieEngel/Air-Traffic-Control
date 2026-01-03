@@ -995,7 +995,7 @@ onUnmounted(() => {
       <div id="mapContainer"></div>
       
       <button class="search-btn" @click="searchCurrentArea">
-        Search This Area 🔍
+        Search This Area
       </button>
     </div>
   </div>

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import requests
 from requests.auth import HTTPBasicAuth
@@ -48,48 +48,7 @@ if not CLIENT_ID or not CLIENT_SECRET:
 # SET THIS TO FALSE TO COLLECT DATA (LONG ISLAND)
 TEST_MODE = False
 
-# --- 3. HELPER FUNCTIONS ---
-
-# logging flight data for training markov model
-
-LOG_FILE = os.path.join("data", "flight_history.csv") 
-
-# Make sure the folder exists, or create it automatically
-os.makedirs("data", exist_ok=True)
-
-def log_flight_data(flight_records: list):
-    """
-    Appends flight data to a CSV file for future ML training.
-    """
-    if not flight_records:
-        return
-
-    file_exists = os.path.isfile(LOG_FILE)
-    
-    # We want to save the timestamp of when we saw this plane
-    current_time = datetime.now().isoformat()
-
-    with open(LOG_FILE, mode="a", newline="") as f:
-        writer = csv.writer(f)
-        
-        # 1. Write Header if new file
-        if not file_exists:
-            writer.writerow(["timestamp", "icao24", "lat", "long", "velocity", "true_track"])
-            
-        # 2. Write Rows
-        for flight in flight_records:
-            # Only save if we have valid location data
-            if flight.get('lat') and flight.get('long'):
-                writer.writerow([
-                    current_time,
-                    flight['icao24'],
-                    flight['lat'],
-                    flight['long'],
-                    flight['velocity'],
-                    flight['true_track']
-                ])
-    
-    print(f"Logged {len(flight_records)} records to {LOG_FILE}")
+# --- HELPER FUNCTIONS ---
 
 # Predicting next position of plane using markov model
 def predict_next_pos(lat, lon):
@@ -132,7 +91,6 @@ def home():
 
 @app.get("/flights")
 def get_flights(
-    background_tasks: BackgroundTasks,
     min_lat: float = 40.45, 
     max_lat: float = 41.30, 
     min_long: float = -74.30, 
@@ -178,11 +136,6 @@ def get_flights(
                 pred_lat, pred_lon = predict_next_pos(flight['lat'], flight['long'])
                 flight['predicted_lat'] = pred_lat
                 flight['predicted_long'] = pred_lon
-
-        # This runs AFTER the response is sent, so it doesn't slow down the map
-        # ONLY log data if we are NOT in test mode
-        if not TEST_MODE:
-            background_tasks.add_task(log_flight_data, records)
         
         # "records" mode: [{'callsign': 'UAL123', 'lat': 30.1}, ...]
         return records
