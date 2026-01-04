@@ -7,7 +7,7 @@
 
 **SkyWatch** is a real-time flight tracking application that visualizes live air traffic data, predicts flight paths using physics-based modeling, and detects potential collisions in real-time.
 
-### 🔗 [Live Demo](https://[YOUR-RENDER-URL].onrender.com)
+### 🔗 [Live Demo](https://atc-frontend.onrender.com)
 
 *(Note: If the demo takes a moment to load, the server is spinning up from sleep mode!)*
 
@@ -91,3 +91,5 @@ Storing global flight history is resource-prohibitive.
 * **Runway Incursion Detection:** Geofencing airport runways to detect unauthorized ground movement.
 
 **Built by [Katie Engel]**
+* [LinkedIn](https://linkedin.com/in/kathleen-engel-gt)
+* [GitHub](https://github.com/KatieEngel)
