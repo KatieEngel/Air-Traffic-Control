@@ -7,18 +7,18 @@
 
 **SkyWatch** is a real-time flight tracking application that visualizes live air traffic data, predicts flight paths using physics-based modeling, and detects potential collisions in real-time.
 
-### 🔗 [Live Demo](https://atc-frontend.onrender.com)
+### [Live Demo](https://atc-frontend.onrender.com)
 
 *(Note: If the demo takes a moment to load, the server is spinning up from sleep mode!)*
 
 ---
 
-### 🎥 App Demo
+### App Demo
 ![App Demo](demo.gif)
 
 ---
 
-## 🚀 Key Features
+## Key Features
 
 * **Real-Time Tracking:** Fetches live flight data from the OpenSky Network API.
 * **Predictive Modeling:** Uses **Kalman Filters** to smooth erratic GPS data and predict a plane's position 60 seconds into the future (Ghost Plane visualization).
@@ -31,7 +31,7 @@
 
 ---
 
-## 🛠️ Engineering Highlights
+## Engineering Highlights
 
 ### 1. The Jitter Problem & Kalman Filters
 Raw API data is often noisy, with planes "teleporting" or freezing between updates. To solve this, I implemented a **Kalman Filter** for each aircraft.
@@ -54,7 +54,7 @@ Storing global flight history is resource-prohibitive.
 
 ---
 
-## 💻 Tech Stack
+## Tech Stack
 
 * **Frontend:** Vue 3 (Composition API), Leaflet.js (Mapping), CSS3 (Animations)
 * **Backend:** Python, FastAPI, Pandas (Data processing), NumPy (Physics calculations)
@@ -63,7 +63,7 @@ Storing global flight history is resource-prohibitive.
 
 ---
 
-## 🔧 How to Run Locally
+## How to Run Locally
 
 1. **Clone the Repository**
    ```bash
@@ -97,6 +97,6 @@ Storing global flight history is resource-prohibitive.
 * **Weather Overlay:** Integrating OpenWeatherMap to visualize storms impacting flight paths.
 * **Runway Incursion Detection:** Geofencing airport runways to detect unauthorized ground movement.
 
-**Built by [Katie Engel]**
+**Built by Katie Engel**
 * [LinkedIn](https://linkedin.com/in/kathleen-engel-gt)
 * [GitHub](https://github.com/KatieEngel)
