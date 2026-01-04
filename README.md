@@ -13,6 +13,11 @@
 
 ---
 
+### 🎥 App Demo
+![App Demo](demo.gif)
+
+---
+
 ## 🚀 Key Features
 
 * **Real-Time Tracking:** Fetches live flight data from the OpenSky Network API.
@@ -21,6 +26,8 @@
 * **Live Breadcrumbs:** "Tron-style" trails visualize the recent history of flight paths, smoothed to remove API jitter.
 * **Region Search:** "Search This Area" feature allows users to query any bounding box on Earth, complete with a spotlight effect for visual focus.
 * **Altitude Visualization:** Aircraft are color-coded based on altitude (White for ground/landing, Cyan for climbing, Purple for cruising).
+
+![Main Interface Screenshot](screenshot.png)
 
 ---
 
