@@ -26,6 +26,7 @@
 * **Live Breadcrumbs:** "Tron-style" trails visualize the recent history of flight paths, smoothed to remove API jitter.
 * **Region Search:** "Search This Area" feature allows users to query any bounding box on Earth, complete with a spotlight effect for visual focus.
 * **Altitude Visualization:** Aircraft are color-coded based on altitude (White for ground/landing, Cyan for climbing, Purple for cruising).
+* **Mobile Optimized:** Fully functioning PWA support, allowing native-like installation on iOS and Android with full-screen immersive mode.
 
 ![Main Interface Screenshot](screenshot.png)
 
@@ -91,6 +92,20 @@ Storing global flight history is resource-prohibitive.
 4. **View App**
    Open http://localhost:5173
 
+## 📱 Mobile Installation (PWA)
+
+This application is a **Progressive Web App (PWA)**. You can install it natively on your phone without an App Store.
+
+**iOS (iPhone):**
+1. Open the [Live Demo](https://atc-frontend.onrender.com) in Safari.
+2. Tap the **Share** button (Square with up arrow).
+3. Scroll down and tap **"Add to Home Screen"**.
+4. The SkyWatch app will appear on your home screen and launch in full-screen mode.
+
+**Android:**
+1. Open the demo in Chrome.
+2. Tap the menu (three dots).
+3. Tap **"Install App"**.
 
 ## Future Roadmap
 
