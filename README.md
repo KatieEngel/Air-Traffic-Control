@@ -92,7 +92,7 @@ Storing global flight history is resource-prohibitive.
 4. **View App**
    Open http://localhost:5173
 
-## 📱 Mobile Installation (PWA)
+## Mobile Installation (PWA)
 
 This application is a **Progressive Web App (PWA)**. You can install it natively on your phone without an App Store.
 
