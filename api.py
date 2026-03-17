@@ -8,6 +8,7 @@ import csv
 from datetime import datetime
 import json
 from dotenv import load_dotenv
+from itertools import cycle
 import time
 
 # 1. Detect if we are in the cloud
