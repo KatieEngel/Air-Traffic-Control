@@ -10,6 +10,16 @@ import json
 from dotenv import load_dotenv
 import time
 
+# 1. Detect if we are in the cloud
+IS_ON_RENDER = os.getenv("RENDER") is not None
+
+# 2. Load the demo data if on Render
+if IS_ON_RENDER:
+    with open("demo_data.json", "r") as f:
+        demo_frames = json.load(f)
+    # cycle() creates an infinite loop of your 15 frames!
+    demo_cycler = cycle(demo_frames)
+
 load_dotenv()
 
 # Load the Markov Model once
@@ -99,6 +109,9 @@ def get_flights(
     """
     Fetches live flight data, cleans it, and returns it as JSON.
     """
+    # 3. If in Demo Mode, instantly return the next frame of recorded data
+    if IS_ON_RENDER:
+        return next(demo_cycler)
 
     token = get_opensky_token()
     if not token:

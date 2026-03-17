@@ -954,7 +954,12 @@ onUnmounted(() => {
           <span v-if="timer > 0">Update in {{ timer }}s</span>
           <span v-else>Fetching...</span>
         </div>
-        
+      </div>
+
+      <div class="demo-badge">
+        ⚠️ <b>DEMO MODE</b><br>
+        Playing simulated data due to OpenSky cloud firewalls. 
+        Kalman filters and collision logic are actively processing the feed.
       </div>
 
       <div class="toggle-container">
@@ -1081,6 +1086,17 @@ h2 {
   font-size: 0.8rem;
   font-weight: bold;
   animation: pulse 2s infinite;
+}
+
+.demo-badge {
+  background: #332b00;
+  color: #ffcc00;
+  padding: 10px;
+  border-radius: 6px;
+  border: 1px solid #ffcc00;
+  font-size: 0.8rem;
+  margin-bottom: 15px;
+  line-height: 1.4;
 }
 
 @keyframes pulse {
