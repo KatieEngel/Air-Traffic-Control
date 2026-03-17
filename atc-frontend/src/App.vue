@@ -269,6 +269,12 @@ const drawFlightHistory = async (icao24) => {
     const response = await axios.get(`${BASE_URL}/flight-track/${icao24}`);
     const path = response.data.path;
 
+    // --- THE RACE CONDITION FIX ---
+    // Check if the user clicked away while we were waiting for the server.
+    // If this plane is no longer the 'selectedPlane', STOP and don't draw anything!
+    if (selectedPlane.value !== icao24) return;
+    // -----------------------------
+
     if (path && path.length > 0) {
       // 3. Draw the Line
       historyLayer = L.polyline(path, {
