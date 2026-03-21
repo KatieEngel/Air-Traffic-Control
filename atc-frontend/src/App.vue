@@ -264,31 +264,29 @@ const drawFlightHistory = async (icao24) => {
   }
 
   try {
-    // 2. Fetch from your new backend endpoint
-    // Note: Use backticks ` ` for string interpolation
-    const response = await axios.get(`${BASE_URL}/flight-track/${icao24}`);
-    const path = response.data.path;
+    // Fetch directly from OpenSky Tracks API
+    const response = await axios.get(`https://opensky-network.org/api/tracks/all?icao24=${icao24}&time=0`);
 
-    // --- THE RACE CONDITION FIX ---
-    // Check if the user clicked away while we were waiting for the server.
-    // If this plane is no longer the 'selectedPlane', STOP and don't draw anything!
+    // Race Condition Check
     if (selectedPlane.value !== icao24) return;
-    // -----------------------------
 
-    if (path && path.length > 0) {
-      // 3. Draw the Line
-      historyLayer = L.polyline(path, {
+
+
+    if (response.data && response.data.path) {
+      // OpenSky returns: [time, lat, lon, baro, true_track, on_ground]
+      // Leaflet just wants: [lat, lon]
+      const pathCoordinates = response.data.path.map(pt => [pt[1], pt[2]]);
+
+      historyLayer = L.polyline(pathCoordinates, {
         color: '#00e5ff', // Cyan (Tron style)
         weight: 3,
         opacity: 0.8,
         lineCap: 'round'
       }).addTo(map.value);
-
-      // Optional: Zoom map to fit the whole path?
-      // map.value.fitBounds(historyLayer.getBounds());
     }
   } catch (error) {
-    console.error("Could not fetch history:", error);
+    // OpenSky restricts history for anonymous users sometimes, so we just log a warning instead of breaking the app.
+    console.warn("History not available for this flight (Anonymous limit reached).");
   }
 };
 
@@ -356,18 +354,43 @@ const fetchFlights = async () => {
     // 1. RESET TIMER IMMEDIATELY
     startCountdown();
 
-    // Pass the coordinates as Query Parameters
+    // 2. OpenSky's exact parameter names for bounding boxes
     const params = {
-      min_lat: currentBbox.value.minLat,
-      max_lat: currentBbox.value.maxLat,
-      min_long: currentBbox.value.minLng,
-      max_long: currentBbox.value.maxLng
+      lamin: currentBbox.value.minLat,
+      lamax: currentBbox.value.maxLat,
+      lomin: currentBbox.value.minLng,
+      lomax: currentBbox.value.maxLng
     };
 
-    const response = await axios.get(API_URL, { params });
-    
+    // 3. FETCH DIRECTLY FROM OPENSKY (Bypassing our Python Backend!)
+    const response = await axios.get("https://opensky-network.org/api/states/all", { params });
     isApiDown.value = false;
-    flights.value = response.data;
+    
+    // 4. DATA MAPPING: Convert OpenSky's raw arrays into our objects
+    if (response.data && response.data.states) {
+      flights.value = response.data.states.map(state => ({
+        icao24: state[0],
+        callsign: state[1] ? state[1].trim() : "N/A",
+        origin_country: state[2],
+        time_position: state[3],
+        last_contact: state[4],
+        long: state[5],
+        lat: state[6],
+        baro_altitude: state[7],
+        on_ground: state[8],
+        velocity: state[9],
+        true_track: state[10],
+        vertical_rate: state[11],
+        sensors: state[12],
+        geo_altitude: state[13] || state[7], // Fallback to baro if geo is missing
+        squawk: state[14],
+        spi: state[15],
+        position_source: state[16]
+      })).filter(f => f.lat && f.long); // Only keep planes that have valid GPS coords
+    } else {
+      flights.value = []; // No planes in the sky here right now
+    }
+
     updateMap();
 
     if (showCollisionToggle.value) {
@@ -956,12 +979,6 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <div class="demo-badge">
-        ⚠️ <b>DEMO MODE</b><br>
-        Playing simulated data due to OpenSky cloud firewalls. 
-        Kalman filters and collision logic are actively processing the feed.
-      </div>
-
       <div class="toggle-container">
         <span class="toggle-label">Show Live Trails</span>
         <label class="switch">
@@ -1086,17 +1103,6 @@ h2 {
   font-size: 0.8rem;
   font-weight: bold;
   animation: pulse 2s infinite;
-}
-
-.demo-badge {
-  background: #332b00;
-  color: #ffcc00;
-  padding: 10px;
-  border-radius: 6px;
-  border: 1px solid #ffcc00;
-  font-size: 0.8rem;
-  margin-bottom: 15px;
-  line-height: 1.4;
 }
 
 @keyframes pulse {
