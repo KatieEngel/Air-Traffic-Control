@@ -264,29 +264,24 @@ const drawFlightHistory = async (icao24) => {
   }
 
   try {
-    // Fetch directly from OpenSky Tracks API
-    const response = await axios.get(`https://opensky-network.org/api/tracks/all?icao24=${icao24}&time=0`);
-
+    // Ask our Python server for the track!
+    const response = await axios.get(`${BASE_URL}/flight-track/${icao24}`);
+    
     // Race Condition Check
     if (selectedPlane.value !== icao24) return;
 
+    const pathCoordinates = response.data.path;
 
-
-    if (response.data && response.data.path) {
-      // OpenSky returns: [time, lat, lon, baro, true_track, on_ground]
-      // Leaflet just wants: [lat, lon]
-      const pathCoordinates = response.data.path.map(pt => [pt[1], pt[2]]);
-
+    if (pathCoordinates && pathCoordinates.length > 0) {
       historyLayer = L.polyline(pathCoordinates, {
-        color: '#00e5ff', // Cyan (Tron style)
+        color: '#00e5ff',
         weight: 3,
         opacity: 0.8,
         lineCap: 'round'
       }).addTo(map.value);
     }
   } catch (error) {
-    // OpenSky restricts history for anonymous users sometimes, so we just log a warning instead of breaking the app.
-    console.warn("History not available for this flight (Anonymous limit reached).");
+    console.error("Could not fetch history:", error);
   }
 };
 
@@ -356,41 +351,18 @@ const fetchFlights = async () => {
 
     // 2. OpenSky's exact parameter names for bounding boxes
     const params = {
-      lamin: currentBbox.value.minLat,
-      lamax: currentBbox.value.maxLat,
-      lomin: currentBbox.value.minLng,
-      lomax: currentBbox.value.maxLng
+      min_lat: currentBbox.value.minLat,
+      max_lat: currentBbox.value.maxLat,
+      min_long: currentBbox.value.minLng,
+      max_long: currentBbox.value.maxLng
     };
 
-    // 3. FETCH DIRECTLY FROM OPENSKY (Bypassing our Python Backend!)
-    const response = await axios.get("https://opensky-network.org/api/states/all", { params });
-    isApiDown.value = false;
+    // Ask our Python server, not OpenSky!
+    const response = await axios.get(API_URL, { params });
     
-    // 4. DATA MAPPING: Convert OpenSky's raw arrays into our objects
-    if (response.data && response.data.states) {
-      flights.value = response.data.states.map(state => ({
-        icao24: state[0],
-        callsign: state[1] ? state[1].trim() : "N/A",
-        origin_country: state[2],
-        time_position: state[3],
-        last_contact: state[4],
-        long: state[5],
-        lat: state[6],
-        baro_altitude: state[7],
-        on_ground: state[8],
-        velocity: state[9],
-        true_track: state[10],
-        vertical_rate: state[11],
-        sensors: state[12],
-        geo_altitude: state[13] || state[7], // Fallback to baro if geo is missing
-        squawk: state[14],
-        spi: state[15],
-        position_source: state[16]
-      })).filter(f => f.lat && f.long); // Only keep planes that have valid GPS coords
-    } else {
-      flights.value = []; // No planes in the sky here right now
-    }
-
+    isApiDown.value = false;
+    // Python already mapped the data perfectly for us!
+    flights.value = response.data;
     updateMap();
 
     if (showCollisionToggle.value) {
@@ -405,9 +377,8 @@ const fetchFlights = async () => {
 
   } catch (error) {
     console.error("Error fetching flights:", error);
-    // Check if it's a 503 (Server Error)
-    if (error.response && error.response.status === 503) {
-       isApiDown.value = true; // Trigger the UI warning
+    if (error.response && error.response.status === 502) {
+       isApiDown.value = true;
     }
   }
 };
