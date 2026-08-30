@@ -123,28 +123,6 @@ Because OpenSky's real-time API heavily rate-limits and firewalls cloud datacent
 4. **View App**
    Open http://localhost:5173
 
-## Mobile Installation (PWA)
-
-This application is a **Progressive Web App (PWA)**. You can install it natively on your phone without an App Store.
-
-**iOS (iPhone):**
-
-1. Open the [Live Demo](https://atc-frontend.onrender.com) in Safari.
-2. Tap the **Share** button (Square with up arrow).
-3. Scroll down and tap **"Add to Home Screen"**.
-4. The SkyWatch app will appear on your home screen and launch in full-screen mode.
-
-**Android:**
-
-1. Open the demo in Chrome.
-2. Tap the menu (three dots).
-3. Tap **"Install App"**.
-
-## Future Roadmap
-
-- **Weather Overlay:** Integrating OpenWeatherMap to visualize storms impacting flight paths.
-- **Runway Incursion Detection:** Geofencing airport runways to detect unauthorized ground movement.
-
 **Built by Katie Engel**
 
 - [LinkedIn](https://linkedin.com/in/kathleen-engel-gt)
