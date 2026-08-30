@@ -59,7 +59,6 @@ Storing global flight history is resource-prohibitive.
 
 - **Frontend:** Vue 3 (Composition API), Leaflet.js (Mapping), CSS3 (Animations)
 - **Backend:** Python, FastAPI, Pandas (Data processing), NumPy (Physics calculations)
-- **Deployment:** Render (Web Service for Python, Static Site for Vue)
 - **API:** OpenSky Network
 
 ---
